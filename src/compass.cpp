@@ -9,7 +9,6 @@ static SensorQMI8658 qmi;
 static QMC5883LCompass mag;
 static Preferences prefs;
 
-namespace {
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Offset_X_Key = "off_x";
@@ -18,6 +17,7 @@ constexpr const char *Offset_Z_Key = "off_z";
 constexpr const char *Scale_X_Key = "scale_x";
 constexpr const char *Scale_Y_Key = "scale_y";
 constexpr const char *Scale_Z_Key = "scale_z";
+
 
 void loadCalibrationFromNVS() {
   if (!prefs.begin(Compass_NVS_Namespace, true)) {
@@ -37,6 +37,7 @@ void loadCalibrationFromNVS() {
   prefs.end();
 }
 
+
 void saveCalibrationToNVS() {
   if (!prefs.begin(Compass_NVS_Namespace, false)) {
     return;
@@ -50,25 +51,23 @@ void saveCalibrationToNVS() {
   prefs.putBool(Calibration_Valid_Key, true);
   prefs.end();
 }
-}
+
 
 bool compassInit(int sda, int scl) {
-  // QMI8658 address 0x6B
-  if (!qmi.begin(Wire, 0x6B, sda, scl)) {
-    return false;
-  }
-  qmi.configAccelerometer(
-      SensorQMI8658::ACC_RANGE_2G,
-      SensorQMI8658::ACC_ODR_125Hz,
-      SensorQMI8658::LPF_MODE_0);
+  // QMI8658
+  qmi.begin(Wire, 0x6B, sda, scl);  // Default address 0x6B
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_2G, SensorQMI8658::ACC_ODR_125Hz, SensorQMI8658::LPF_MODE_2);
   qmi.enableAccelerometer();
+  qmi.disableGyroscope();
 
-  // QMC5883L address 0x0D
-  mag.init();
+  // QMC5883L
+  mag.init();  // Default address 0x0D
+  mag.setMode(0x01, 0x04, 0x10, 0x00);  // mode=continuous, ODR=50Hz, range=8G, OSR=512
   loadCalibrationFromNVS();
 
   return true;
 }
+
 
 float readHeading() {
   // Accelerometer
@@ -101,6 +100,7 @@ float readHeading() {
   }
   return heading;
 }
+
 
 void compassCalibrate() {
   mag.calibrate();
