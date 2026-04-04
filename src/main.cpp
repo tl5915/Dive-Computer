@@ -51,8 +51,8 @@ constexpr float Dive_Start_Depth = 1.0f;            // Start timer at 1 m
 constexpr float Low_Battery_Threshold = 3.7f;       // Dim screen below 3.7 V
 constexpr float Critical_Battery_Threshold = 3.2f;  // Deep sleep below 3.2 V
 constexpr float Battery_Divider_Ratio = 3.0f;       // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 800.0f;           // Lux level that reaches high brightness
-constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
+constexpr float Ambient_Lux_Max = 800.0f;           // Lux level at high backlight
+constexpr uint8_t Backlight_Low = 8;                // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
 
 // Variables
