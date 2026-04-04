@@ -1,11 +1,13 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <BH1750.h>
 #include <MS5837.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <esp_bt.h>
 #include <esp_sleep.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 #include "compass.h"
 
@@ -24,6 +26,7 @@ constexpr uint8_t Calibration_Button_Pin = 40;
 
 // Define Objects
 MS5837 sensor;
+BH1750 lightMeter;
 SPIClass spi(FSPI);
 Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
 
@@ -39,17 +42,18 @@ constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Tab
 // Constants
 constexpr uint16_t LCD_Width = 240;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint32_t Button_Debounce_MS = 50;
-constexpr uint32_t Calibration_Delay_MS = 5000;
-constexpr uint32_t Message_US = 1000000;
-constexpr uint32_t Loop_US = 500000;
-constexpr float Depth_Offset = 0.2f;
-constexpr float Dive_Start_Depth = 1.0f;
-constexpr float Low_Battery_Threshold = 3.7f;
-constexpr float Critical_Battery_Threshold = 3.2f;
-constexpr float Battery_Divider_Ratio = 3.0f;
-constexpr uint8_t Backlight_Normal = 255;
-constexpr uint8_t Backlight_Low = 8;
+constexpr uint32_t Button_Debounce_MS = 50;         // Button debounce time 50 ms
+constexpr uint32_t Calibration_Delay_MS = 5000;     // Delay 5 seconds before calibration
+constexpr uint32_t Message_US = 2000000;            // Display messages for 2 seconds
+constexpr uint32_t Loop_US = 100000;                // 10 Hz display refresh rate
+constexpr float Depth_Offset = 0.2f;                // Sea level offset 0.2 m
+constexpr float Dive_Start_Depth = 1.0f;            // Start timer at 1 m
+constexpr float Low_Battery_Threshold = 3.7f;       // Dim screen below 3.7 V
+constexpr float Critical_Battery_Threshold = 3.2f;  // Deep sleep below 3.2 V
+constexpr float Battery_Divider_Ratio = 3.0f;       // 2:1 voltage divider
+constexpr float Ambient_Lux_Max = 800.0f;           // Lux level that reaches high brightness
+constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
+constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
 
 // Variables
 float Depth = 0.0f;
@@ -60,7 +64,8 @@ uint32_t Timer_Start_Millis = 0;
 bool Dive_Timer_Started = false;
 int Minutes = 0;
 int Seconds = 0;
-uint8_t Backlight_Level = Backlight_Normal;
+float Ambient_Lux = 0.0f;
+uint8_t Backlight_Level = Backlight_High;
 bool Calibration_Armed = false;
 uint32_t Calibration_Start_MS = 0;
 uint8_t Button_Last_Reading = HIGH;
@@ -202,12 +207,10 @@ void drawCompassBanner(int16_t x, int16_t y, int16_t w, int16_t h, float directi
     if (delta < -60.0f || delta > 60.0f) {
       continue;
     }
-
     const int16_t tickX = centerX + static_cast<int16_t>(delta * pixelsPerDegree);
     if (tickX < x || tickX >= (x + w)) {
       continue;
     }
-
     int16_t x1 = 0;
     int16_t y1 = 0;
     uint16_t labelW = 0;
@@ -220,7 +223,6 @@ void drawCompassBanner(int16_t x, int16_t y, int16_t w, int16_t h, float directi
     display.setCursor(tickX - static_cast<int16_t>(labelW / 2), labelY);
     display.print(marker.label);
   }
-
   display.fillTriangle(centerX - 4, topLineY + 2, centerX + 4, topLineY + 2, centerX, topLineY + 8, ST77XX_CYAN);
   display.drawLine(centerX, topLineY + 8, centerX, bottomLineY - 1, ST77XX_CYAN);
 }
@@ -230,10 +232,8 @@ void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
   if (heading == 360) {
     heading = 0;
   }
-
   char headingString[8];
   snprintf(headingString, sizeof(headingString), "-%03d-", heading);
-
   int16_t x1 = 0;
   int16_t y1 = 0;
   uint16_t textW = 0;
@@ -245,13 +245,14 @@ void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
   display.print(headingString);
 }
 
+
+// Compass Calibration Button
 bool calibrationButtonPressed() {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(Calibration_Button_Pin));
   if (reading != Button_Last_Reading) {
     Button_Last_Change_MS = millis();
     Button_Last_Reading = reading;
   }
-
   if ((millis() - Button_Last_Change_MS) >= Button_Debounce_MS) {
     if (reading != Button_Stable_State) {
       Button_Stable_State = reading;
@@ -261,6 +262,17 @@ bool calibrationButtonPressed() {
     }
   }
   return false;
+}
+
+// Backlight Level
+uint8_t ambientBacklightLevel(float lux) {
+  if (lux <= 0.0f) {
+    return Backlight_Low;
+  }
+  float normalised = log10f(lux + 1.0f) / log10f(Ambient_Lux_Max + 1.0f);
+  if (normalised < 0.0f) normalised = 0.0f;
+  if (normalised > 1.0f) normalised = 1.0f;
+  return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
 // Display Update
@@ -384,6 +396,9 @@ void setup() {
   sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
   sensor.setFluidDensity(1020);          // EN13319 density
 
+  // BH1750 Initialisation
+  lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE);  // 4 lux, 16 ms
+
   // QMI8658 and QMC5883L Initialisation
   compassInit(SDA_Pin, SCL_Pin);
 
@@ -391,7 +406,7 @@ void setup() {
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
   pinMode(Calibration_Button_Pin, INPUT_PULLUP);
   pinMode(Backlight_Pin, OUTPUT);
-  analogWrite(Backlight_Pin, Backlight_Normal);
+  analogWrite(Backlight_Pin, Backlight_High);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
@@ -403,11 +418,13 @@ void setup() {
 
 
 void loop() {
+  const int64_t loopStartUs = esp_timer_get_time();
+
+  // Compass Calibration
   if (calibrationButtonPressed() && !Calibration_Armed) {
     Calibration_Armed = true;
     Calibration_Start_MS = millis();
   }
-
   if (Calibration_Armed) {
     const uint32_t elapsed = millis() - Calibration_Start_MS;
     if (elapsed < Calibration_Delay_MS) {
@@ -418,11 +435,9 @@ void loop() {
       esp_light_sleep_start();
       return;
     }
-
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
     compassCalibrate();
-
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Done", 98, 4, ST77XX_GREEN);
     esp_sleep_enable_timer_wakeup(Message_US);
@@ -430,6 +445,7 @@ void loop() {
     Calibration_Armed = false;
   }
 
+  // Sensor Readings
   sensor.read();
   Depth = sensor.depth() - Depth_Offset;  // Sea level offset
   if (Depth < 0.0f) Depth = 0.0f;         // Minimum depth 0 meter
@@ -439,14 +455,18 @@ void loop() {
 
   Heading = readHeading();
 
+  Ambient_Lux = lightMeter.readLightLevel();
+
   Battery_Voltage = readBattery();
 
-  updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
-
+  // Low Battery
   if (Battery_Voltage < Low_Battery_Threshold) {
-    analogWrite(Backlight_Pin, Backlight_Low);
+    Backlight_Level = Backlight_Low;
+    analogWrite(Backlight_Pin, Backlight_Level);
+  } else {
+    Backlight_Level = ambientBacklightLevel(Ambient_Lux);
+    analogWrite(Backlight_Pin, Backlight_Level);
   }
-  
   if (Battery_Voltage < Critical_Battery_Threshold) {
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Battery", 86, 4, ST77XX_RED);
@@ -457,6 +477,12 @@ void loop() {
     esp_deep_sleep_start();
   }
 
-  esp_sleep_enable_timer_wakeup(Loop_US);
-  esp_light_sleep_start();
+  // Display Update
+  updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
+
+  const int64_t elapsedUs = esp_timer_get_time() - loopStartUs;
+  if (elapsedUs < static_cast<int64_t>(Loop_US)) {
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(Loop_US) - static_cast<uint64_t>(elapsedUs));
+    esp_light_sleep_start();
+  }
 }

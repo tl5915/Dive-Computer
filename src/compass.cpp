@@ -17,6 +17,7 @@ constexpr const char *Offset_Z_Key = "off_z";
 constexpr const char *Scale_X_Key = "scale_x";
 constexpr const char *Scale_Y_Key = "scale_y";
 constexpr const char *Scale_Z_Key = "scale_z";
+constexpr uint32_t Calibration_Duration_MS = 30000;  // Calibrate for 30 seconds
 
 
 void loadCalibrationFromNVS() {
@@ -103,6 +104,45 @@ float readHeading() {
 
 
 void compassCalibrate() {
-  mag.calibrate();
+  mag.clearCalibration();
+
+  long minX = mag.getX();
+  long maxX = minX;
+  long minY = mag.getY();
+  long maxY = minY;
+  long minZ = mag.getZ();
+  long maxZ = minZ;
+
+  const uint32_t startTime = millis();
+  while ((millis() - startTime) < Calibration_Duration_MS) {
+    mag.read();
+
+    const long x = mag.getX();
+    const long y = mag.getY();
+    const long z = mag.getZ();
+
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+
+  const float xOffset = (minX + maxX) * 0.5f;
+  const float yOffset = (minY + maxY) * 0.5f;
+  const float zOffset = (minZ + maxZ) * 0.5f;
+
+  const float xHalfSpan = (maxX - minX) * 0.5f;
+  const float yHalfSpan = (maxY - minY) * 0.5f;
+  const float zHalfSpan = (maxZ - minZ) * 0.5f;
+  const float averageHalfSpan = (xHalfSpan + yHalfSpan + zHalfSpan) / 3.0f;
+
+  mag.setCalibrationOffsets(xOffset, yOffset, zOffset);
+  mag.setCalibrationScales(
+      (xHalfSpan > 0.0f) ? (averageHalfSpan / xHalfSpan) : 1.0f,
+      (yHalfSpan > 0.0f) ? (averageHalfSpan / yHalfSpan) : 1.0f,
+      (zHalfSpan > 0.0f) ? (averageHalfSpan / zHalfSpan) : 1.0f);
+
   saveCalibrationToNVS();
 }
