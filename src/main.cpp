@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <BH1750.h>
 #include <MS5837.h>
+#include <ZHL16C.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <esp_bt.h>
@@ -10,7 +11,6 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include "compass.h"
-#include "ZHL16C.h"
 
 
 // Pins
