@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include "compass.h"
+#include "ZHL16C.h"
 
 
 // Pins
@@ -39,38 +40,67 @@ constexpr uint8_t Percentage_Table[] = {
     55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
-// Constants
+// LCD Constants
 constexpr uint16_t LCD_Width = 240;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint32_t Button_Debounce_MS = 50;         // Button debounce time 50 ms
-constexpr uint32_t Calibration_Delay_MS = 5000;     // Delay 5 seconds before calibration
-constexpr uint32_t Message_US = 2000000;            // Display messages for 2 seconds
-constexpr uint32_t Loop_US = 100000;                // 10 Hz display refresh rate
-constexpr float Depth_Offset = 0.2f;                // Sea level offset 0.2 m
-constexpr float Dive_Start_Depth = 1.0f;            // Start timer at 1 m
-constexpr float Low_Battery_Threshold = 3.7f;       // Dim screen below 3.7 V
-constexpr float Critical_Battery_Threshold = 3.2f;  // Deep sleep below 3.2 V
-constexpr float Battery_Divider_Ratio = 3.0f;       // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 800.0f;           // Lux level at high backlight
-constexpr uint8_t Backlight_Low = 8;                // Low backlight in dark surroundings
-constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
+constexpr float Low_Battery_Threshold = 3.7f;          // Dim screen below 3.7 V
+constexpr float Critical_Battery_Threshold = 3.2f;     // Deep sleep below 3.2 V
+constexpr float Battery_Divider_Ratio = 3.0f;          // 2:1 voltage divider
+constexpr float Ambient_Lux_Max = 800.0f;              // Lux level at high backlight
+constexpr uint8_t Backlight_Low = 8;                   // Low backlight in dark surroundings
+constexpr uint8_t Backlight_High = 255;                // High backlight in bright surroundings
+constexpr uint32_t Message_US = 2000000;               // Display messages for 2 seconds
+constexpr uint32_t Bottom_Timer_Loop_US = 100000;      // Bottom timer mode: 10 Hz display refresh rate
+constexpr uint32_t Dive_Computer_Loop_US = 1000000;    // Dive computer mode: 1 Hz display refresh rate
+constexpr uint32_t Deco_Compute_Period_US = 10000000;  // Recompute decompression every 10 seconds
+
+// Tap Detection Constants
+constexpr float Tap_Threshold_G = 2.0f;          // Acceleration spike threshold
+constexpr uint32_t Tap_Window_US = 2000000;      // 3 taps window 2 seconds
+constexpr uint32_t Tap_Min_Spacing_US = 100000;  // Minimum gap between taps 100 ms
+
+// Button Constants
+constexpr uint32_t Button_Debounce_US = 50000;      // Button debounce time 50 ms
+constexpr uint32_t Calibration_Delay_US = 5000000;  // Delay 5 seconds before calibration
+
+// Depth Sensor Constants
+constexpr uint16_t Density = 1020;        // EN13319 density
+constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
+constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
+constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
 // Variables
+enum DisplayMode : uint8_t { MODE_BOTTOM_TIMER, MODE_DIVE_COMPUTER };
+static DisplayMode currentMode = MODE_BOTTOM_TIMER;
 float Depth = 0.0f;
 float Heading = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
-uint32_t Timer_Start_Millis = 0;
+uint64_t Timer_Start_US = 0;
 bool Dive_Timer_Started = false;
 int Minutes = 0;
 int Seconds = 0;
 float Ambient_Lux = 0.0f;
 uint8_t Backlight_Level = Backlight_High;
 bool Calibration_Armed = false;
-uint32_t Calibration_Start_MS = 0;
+uint64_t Calibration_Start_US = 0;
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
-uint32_t Button_Last_Change_MS = 0;
+uint64_t Button_Last_Change_US = 0;
+static uint8_t tripleTapCount = 0;
+static uint64_t tripleTapFirstUs = 0;
+static uint64_t tripleTapLastUs = 0;
+static bool tripleTapAboveThresh = false;
+static uint8_t doubleTapCount = 0;
+static uint64_t doubleTapFirstUs = 0;
+static uint64_t doubleTapLastUs = 0;
+static bool doubleTapAboveThresh = false;
+static bool Mad_Man_Mode = false;
+static bool Mad_Man_Pending = false;
+static DecoResult lastDecoResult= {false, 0.0f, 0, 0};
+static uint64_t Deco_Last_Update_US = 0;
+static uint64_t Deco_Compute_US = 0;
+static uint64_t Dive_Display_US = 0;
 
 // Compass Labels
 struct CompassLabel {
@@ -78,9 +108,11 @@ struct CompassLabel {
   const char *label;
 };
 const CompassLabel Compass_Labels[] = {
-    {0, "N"},   {30, "30"},  {60, "60"},   {90, "E"},
-    {120, "120"}, {150, "150"}, {180, "S"},   {210, "210"},
-    {240, "240"}, {270, "W"},   {300, "300"}, {330, "330"}};
+    {0, "N"}, {30, "30"}, {60, "60"},
+    {90, "E"}, {120, "120"}, {150, "150"},
+    {180, "S"}, {210, "210"}, {240, "240"},
+    {270, "W"}, {300, "300"}, {330, "330"}
+  };
 
 
 // Display Centre Text 
@@ -98,18 +130,33 @@ void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colo
   display.print(text);
 }
 
+static void drawColCentreText(const char *text, int16_t colX, int16_t colW,
+                               int16_t y, uint8_t textSize, uint16_t colour) {
+  int16_t x1 = 0, y1 = 0;
+  uint16_t w = 0, h = 0;
+  display.setTextSize(textSize);
+  display.setTextWrap(false);
+  display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+  const int16_t x = colX + ((colW - static_cast<int16_t>(w)) / 2) - x1;
+  display.setCursor(x, y);
+  display.setTextColor(colour);
+  display.print(text);
+}
+
+
 // Timer
-void updateTimer(float Depth) {
+void updateTimer(float Depth, uint64_t nowUs) {
   if (Depth >= Dive_Start_Depth && !Dive_Timer_Started) {
-    Timer_Start_Millis = millis();
+    Timer_Start_US = nowUs;
     Dive_Timer_Started = true;
   }
   if (Dive_Timer_Started) {
-    const uint32_t elapsedMillis = millis() - Timer_Start_Millis;
-    Minutes = static_cast<int>(elapsedMillis / 60000UL);
-    Seconds = static_cast<int>((elapsedMillis % 60000UL) / 1000UL);
+    const uint64_t elapsedUs = nowUs - Timer_Start_US;
+    Minutes = static_cast<int>(elapsedUs / 60000000ULL);
+    Seconds = static_cast<int>((elapsedUs % 60000000ULL) / 1000000ULL);
   }
 }
+
 
 // Battery Voltage
 float readBattery() {
@@ -121,6 +168,7 @@ float readBattery() {
   float voltage = (millivoltSum / sampleCount) / 1000.0f * Battery_Divider_Ratio;
   return voltage;
 }
+
 
 // Battery Percentage
 uint8_t batteryPercentage(float Battery_Voltage) {
@@ -142,6 +190,7 @@ uint8_t batteryPercentage(float Battery_Voltage) {
   return 0;
 }
 
+
 // Battery Indicator
 void drawBatteryIndicator(int16_t rightEdgeX, int16_t topY, uint8_t percentage) {
   uint16_t fillColor = ST77XX_GREEN;
@@ -161,6 +210,7 @@ void drawBatteryIndicator(int16_t rightEdgeX, int16_t topY, uint8_t percentage) 
   display.fillRect(outlineX + outlineW, outlineY + 5, tipW, outlineH - 10, ST77XX_WHITE);
   display.fillRect(outlineX + padding, outlineY + padding, fillWidth, outlineH - (padding * 2), fillColor);
 }
+
 
 // Compass
 void drawCompassBanner(int16_t x, int16_t y, int16_t w, int16_t h, float direction) {
@@ -247,13 +297,13 @@ void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
 
 
 // Compass Calibration Button
-bool calibrationButtonPressed() {
+bool calibrationButtonPressed(uint64_t nowUs) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(Calibration_Button_Pin));
   if (reading != Button_Last_Reading) {
-    Button_Last_Change_MS = millis();
+    Button_Last_Change_US = nowUs;
     Button_Last_Reading = reading;
   }
-  if ((millis() - Button_Last_Change_MS) >= Button_Debounce_MS) {
+  if ((nowUs - Button_Last_Change_US) >= Button_Debounce_US) {
     if (reading != Button_Stable_State) {
       Button_Stable_State = reading;
       if (Button_Stable_State == LOW) {
@@ -263,6 +313,7 @@ bool calibrationButtonPressed() {
   }
   return false;
 }
+
 
 // Backlight Level
 uint8_t ambientBacklightLevel(float lux) {
@@ -275,7 +326,8 @@ uint8_t ambientBacklightLevel(float lux) {
   return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
-// Display Update
+
+// Bottom Timer Display Update
 void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage) {
   Battery_Percentage = batteryPercentage(Battery_Voltage);
 
@@ -376,6 +428,146 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
 }
 
 
+// Triple-tap
+bool detectTripleTap(uint64_t nowUs) {
+  const float mag = readAccelMagnitude();
+  if (tripleTapCount > 0 && (nowUs - tripleTapFirstUs) > Tap_Window_US) {
+    tripleTapCount= 0;
+  }
+  bool newTap = false;
+  if (mag > Tap_Threshold_G) {
+    if (!tripleTapAboveThresh) {
+      tripleTapAboveThresh = true;
+      if (tripleTapCount == 0 || (nowUs - tripleTapLastUs) >= Tap_Min_Spacing_US) {
+        newTap = true;
+      }
+    }
+  } else {
+    tripleTapAboveThresh = false;
+  }
+  if (newTap) {
+    if (tripleTapCount == 0) tripleTapFirstUs = nowUs;
+    tripleTapCount++;
+    tripleTapLastUs = nowUs;
+    if (tripleTapCount >= 3) {
+      tripleTapCount = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+// Double-tap
+bool detectDoubleTap(uint64_t nowUs) {
+  const float mag = readAccelMagnitude();
+  if (doubleTapCount > 0 && (nowUs - doubleTapFirstUs) > Tap_Window_US) {
+    doubleTapCount = 0;
+  }
+  bool newTap = false;
+  if (mag > Tap_Threshold_G) {
+    if (!doubleTapAboveThresh) {
+      doubleTapAboveThresh = true;
+      if (doubleTapCount == 0 || (nowUs - doubleTapLastUs) >= Tap_Min_Spacing_US) {
+        newTap = true;
+      }
+    }
+  } else {
+    doubleTapAboveThresh = false;
+  }
+  if (newTap) {
+    if (doubleTapCount == 0) doubleTapFirstUs = nowUs;
+    doubleTapCount++;
+    doubleTapLastUs = nowUs;
+    if (doubleTapCount >= 2) {
+      doubleTapCount = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+// Dive Computer Display Update
+void updateDiveComputerDisplay(float depth, int minutes, int seconds, float battVoltage, const DecoResult &deco) {
+  Battery_Percentage = batteryPercentage(battVoltage);
+  display.fillScreen(ST77XX_BLACK);
+
+  // Depth at top-left
+  const int depthInt = static_cast<int>(depth);
+  int depthDec = static_cast<int>(roundf(depth * 10.0f)) % 10;
+  if (depthDec < 0) depthDec += 10;
+  char depthNum[8];
+  snprintf(depthNum, sizeof(depthNum), "%d.%d", depthInt, depthDec);
+  display.setTextSize(4);
+  display.setTextColor(ST77XX_WHITE);
+  display.setCursor(5, 8);
+  display.print(depthNum);
+  display.setTextColor(ST77XX_CYAN);
+  display.print("m");
+
+  // Battery indicator at top-right
+  drawBatteryIndicator(LCD_Width - 8, 5, Battery_Percentage);
+
+  // Timer at mid right
+  char timerStr[8];
+  snprintf(timerStr, sizeof(timerStr), "%d:%02d", minutes, seconds);
+  {
+    int16_t tx1 = 0, ty1 = 0;
+    uint16_t tW = 0, tH = 0;
+    display.setTextSize(3);
+    display.getTextBounds(timerStr, 0, 0, &tx1, &ty1, &tW, &tH);
+    display.setCursor(LCD_Width - 8 - static_cast<int16_t>(tW), 28);
+    display.setTextColor(ST77XX_WHITE);
+    display.print(timerStr);
+  }
+
+  // Current GF at mid left
+  char gfStr[12];
+  if (Mad_Man_Mode) {
+    snprintf(gfStr, sizeof(gfStr), "GF 99/99");
+  } else {
+    snprintf(gfStr, sizeof(gfStr), "GF 60/85");
+  }
+  display.setTextSize(1);
+  display.setTextColor(Mad_Man_Mode ? ST77XX_RED : ST77XX_GREEN);
+  display.setCursor(8, 50);
+  display.print(gfStr);
+
+  // Horizontal divider
+  constexpr int16_t divY = 58;
+  display.drawFastHLine(0, divY, LCD_Width, ST77XX_WHITE);
+
+  // Three-column deco table
+  constexpr int16_t col1X = 0, col1W = 93;
+  constexpr int16_t col2X = 93, col2W = 93;
+  constexpr int16_t col3X = 186, col3W = 94;
+  display.drawFastVLine(col2X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
+  display.drawFastVLine(col3X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
+
+  if (!deco.inDeco) {
+    drawCentreText("NO DECO", 105, 3, ST77XX_GREEN);
+    if (deco.timeToSurface > 0) {
+      char ttsStr[12];
+      snprintf(ttsStr, sizeof(ttsStr), "~%d min", deco.timeToSurface);
+      drawCentreText(ttsStr, 155, 2, ST77XX_CYAN);
+    }
+  } else {
+    drawColCentreText("STOP", col1X, col1W, 66, 2, ST77XX_CYAN);
+    drawColCentreText("TIME", col2X, col2W, 66, 2, ST77XX_CYAN);
+    drawColCentreText("TTS", col3X, col3W, 66, 2, ST77XX_CYAN);
+
+    char stopStr[8], timeStr[8], ttsStr[8];
+    snprintf(stopStr, sizeof(stopStr), "%dm", (int)deco.nextStopDepth);
+    snprintf(timeStr, sizeof(timeStr), "%dm", deco.stopTime);
+    snprintf(ttsStr, sizeof(ttsStr), "%dm", deco.timeToSurface);
+    drawColCentreText(stopStr, col1X, col1W, 90, 4, ST77XX_WHITE);
+    drawColCentreText(timeStr, col2X, col2W, 90, 4, ST77XX_WHITE);
+    drawColCentreText(ttsStr, col3X, col3W, 90, 4, ST77XX_WHITE);
+  }
+}
+
+
 void setup() {
   // Power Conservation
   esp_wifi_stop();              // WiFi off
@@ -394,13 +586,18 @@ void setup() {
   // MS5837 Initialisation
   sensor.init();
   sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
-  sensor.setFluidDensity(1020);          // EN13319 density
+  sensor.setFluidDensity(Density);       // Set water density
 
   // BH1750 Initialisation
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE);  // 4 lux, 16 ms
 
   // QMI8658 and QMC5883L Initialisation
   compassInit(SDA_Pin, SCL_Pin);
+
+  // ZHL-16C Initialisation
+  decoInit();
+  mad_man_mode(false);
+  Deco_Last_Update_US = static_cast<uint64_t>(esp_timer_get_time());
 
   // Display Initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
@@ -418,20 +615,53 @@ void setup() {
 
 
 void loop() {
-  const int64_t loopStartUs = esp_timer_get_time();
+  const uint64_t loopStartUs = static_cast<uint64_t>(esp_timer_get_time());
+  bool modeChanged = false;
+  bool tripleTapTriggered = false;
+
+  // Bottom Timer or Diver Computer
+  if (detectTripleTap(loopStartUs)) {
+    currentMode = (currentMode == MODE_BOTTOM_TIMER) ? MODE_DIVE_COMPUTER : MODE_BOTTOM_TIMER;
+    modeChanged = true;
+    tripleTapTriggered = true;
+  }
+
+  // Mad Man Mode (no more GF, raw Bühlmann ZHL-16C algorithm)
+  if (currentMode == MODE_DIVE_COMPUTER) {
+    if (tripleTapTriggered) {
+      Mad_Man_Pending = false;
+    } else if (detectDoubleTap(loopStartUs)) {
+      Mad_Man_Pending = true;
+    }
+    if (Mad_Man_Pending && tripleTapCount == 0) {
+      Mad_Man_Mode = !Mad_Man_Mode;
+      mad_man_mode(Mad_Man_Mode);
+      Mad_Man_Pending = false;
+      Dive_Display_US = loopStartUs - Dive_Computer_Loop_US;
+      Deco_Compute_US = loopStartUs - Deco_Compute_Period_US;
+    }
+  } else {
+    Mad_Man_Pending = false;
+  }
+
+  // Recalculate decompression when switched to dive computer mode
+  if (modeChanged && currentMode == MODE_DIVE_COMPUTER) {
+    Dive_Display_US = loopStartUs - Dive_Computer_Loop_US;
+    Deco_Compute_US = loopStartUs - Deco_Compute_Period_US;
+  }
 
   // Compass Calibration
-  if (calibrationButtonPressed() && !Calibration_Armed) {
+  if (calibrationButtonPressed(loopStartUs) && !Calibration_Armed) {
     Calibration_Armed = true;
-    Calibration_Start_MS = millis();
+    Calibration_Start_US = loopStartUs;
   }
   if (Calibration_Armed) {
-    const uint32_t elapsed = millis() - Calibration_Start_MS;
-    if (elapsed < Calibration_Delay_MS) {
+    const uint64_t elapsedUs = loopStartUs - Calibration_Start_US;
+    if (elapsedUs < Calibration_Delay_US) {
       display.fillScreen(ST77XX_BLACK);
       drawCentreText("Compass", 70, 4, ST77XX_WHITE);
       drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
-      esp_sleep_enable_timer_wakeup(Loop_US);
+      esp_sleep_enable_timer_wakeup(Bottom_Timer_Loop_US);
       esp_light_sleep_start();
       return;
     }
@@ -447,17 +677,25 @@ void loop() {
 
   // Sensor Readings
   sensor.read();
+  const float pressureAtm = sensor.pressure() / MBAR_PER_ATM;
   Depth = sensor.depth() - Depth_Offset;  // Sea level offset
   if (Depth < 0.0f) Depth = 0.0f;         // Minimum depth 0 meter
   if (Depth > 99.9f) Depth = 99.9f;       // Maximum depth 99.9 meters
-
-  updateTimer(Depth);
-
+  updateTimer(Depth, loopStartUs);
   Heading = readHeading();
-
   Ambient_Lux = lightMeter.readLightLevel();
-
   Battery_Voltage = readBattery();
+
+  // ZHL16C Update
+  const float dtMin = static_cast<float>(loopStartUs - Deco_Last_Update_US) / 60000000.0f;
+  Deco_Last_Update_US = loopStartUs;
+  decoUpdate(pressureAtm, dtMin);
+
+  // Recalculate decompression every 10 seconds in dive computer mode
+  if (currentMode == MODE_DIVE_COMPUTER && (loopStartUs - Deco_Compute_US) >= Deco_Compute_Period_US) {
+    lastDecoResult = decoCompute(pressureAtm);
+    Deco_Compute_US = loopStartUs;
+  }
 
   // Low Battery
   if (Battery_Voltage < Low_Battery_Threshold) {
@@ -478,11 +716,17 @@ void loop() {
   }
 
   // Display Update
-  updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
-
-  const int64_t elapsedUs = esp_timer_get_time() - loopStartUs;
-  if (elapsedUs < static_cast<int64_t>(Loop_US)) {
-    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(Loop_US) - static_cast<uint64_t>(elapsedUs));
+  if (currentMode == MODE_DIVE_COMPUTER) {
+    if ((loopStartUs - Dive_Display_US) >= Dive_Computer_Loop_US) {
+      updateDiveComputerDisplay(Depth, Minutes, Seconds, Battery_Voltage, lastDecoResult);
+      Dive_Display_US = loopStartUs;
+    }
+  } else {
+    updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
+  }
+  const uint64_t elapsedUs = static_cast<uint64_t>(esp_timer_get_time()) - loopStartUs;
+  if (elapsedUs < static_cast<int64_t>(Bottom_Timer_Loop_US)) {
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(Bottom_Timer_Loop_US) - static_cast<uint64_t>(elapsedUs));
     esp_light_sleep_start();
   }
 }

@@ -146,3 +146,12 @@ void compassCalibrate() {
 
   saveCalibrationToNVS();
 }
+
+
+float readAccelMagnitude() {
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  qmi.getAccelerometer(ax, ay, az);
+  return sqrtf(ax * ax + ay * ay + az * az);
+}

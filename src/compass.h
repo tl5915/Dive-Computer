@@ -4,3 +4,4 @@
 bool compassInit(int sda, int scl);
 float readHeading();
 void compassCalibrate();
+float readAccelMagnitude();
