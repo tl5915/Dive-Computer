@@ -80,8 +80,8 @@ uint64_t Dive_Display_US = 0;
 uint16_t Loop_Usage_Percent = 0;
 // Modes
 DisplayMode currentMode = MODE_BOTTOM_TIMER;
-bool Mad_Man_Mode = false;
-bool Mad_Man_Pending = false;
+bool ripNtear_Mode = false;
+bool ripNtear_Pending = false;
 // Dive metrics
 float Depth = 0.0f;
 float Heading = 0.0f;
@@ -561,13 +561,13 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
 
   // Current GF at mid left
   char gfStr[12];
-  if (Mad_Man_Mode) {
+  if (ripNtear_Mode) {
     snprintf(gfStr, sizeof(gfStr), "GF 99/99");
   } else {
     snprintf(gfStr, sizeof(gfStr), "GF 60/85");
   }
   display.setTextSize(1);
-  display.setTextColor(Mad_Man_Mode ? ST77XX_RED : ST77XX_GREEN);
+  display.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN);
   display.setCursor(8, 50);
   display.print(gfStr);
 
@@ -688,22 +688,22 @@ void loop() {
     tripleTapTriggered = true;
   }
 
-  // Mad Man Mode (no more GF, raw Bühlmann ZHL-16C algorithm)
+  //  Rip & Tear Mode (no more GF, raw Bühlmann ZHL-16C algorithm)
   if (currentMode == MODE_DIVE_COMPUTER) {
     if (tripleTapTriggered) {
-      Mad_Man_Pending = false;
+      ripNtear_Pending = false;
     } else if (detectDoubleTap(loopStartUs)) {
-      Mad_Man_Pending = true;
+      ripNtear_Pending = true;
     }
-    if (Mad_Man_Pending && tripleTapCount == 0) {
-      Mad_Man_Mode = !Mad_Man_Mode;
-      mad_man_mode(Mad_Man_Mode);
-      Mad_Man_Pending = false;
+    if (ripNtear_Pending && tripleTapCount == 0) {
+      ripNtear_Mode = !ripNtear_Mode;
+      ripNtear(ripNtear_Mode);
+      ripNtear_Pending = false;
       Dive_Display_US = loopStartUs - Dive_Computer_Loop_US;
       Deco_Last_Update_US = loopStartUs - Deco_Update_Period_US;
     }
   } else {
-    Mad_Man_Pending = false;
+    ripNtear_Pending = false;
   }
 
   // Recalculate decompression when switched to dive computer mode
