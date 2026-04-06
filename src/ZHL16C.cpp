@@ -170,7 +170,6 @@ DecoResult decoCompute(float currentPressureAtm) {
             stopMin++;
             totalMin++;
         }
-
         if (!firstRecorded) {
             firstStopMin  = stopMin;
             firstRecorded = true;
@@ -181,7 +180,7 @@ DecoResult decoCompute(float currentPressureAtm) {
             totalMin += (int)ceilf(dStop / ASCENT_RATE);
             break;
         }
-
+        
         simAscent(n2, dStop, dNext, &totalMin);
         dStop = dNext;
     }
