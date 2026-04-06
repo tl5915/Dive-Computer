@@ -69,6 +69,11 @@ constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
 constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
 constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
+// Decompression Constants
+constexpr u_int8_t GF_Low = 60;
+constexpr u_int8_t GF_High = 85;
+constexpr float Setpoint = 1.2f;
+
 // Variables
 enum DisplayMode : uint8_t { MODE_BOTTOM_TIMER, MODE_DIVE_COMPUTER };
 uint64_t Dive_Display_US = 0;
@@ -105,7 +110,7 @@ uint64_t doubleTapFirstUs = 0;
 uint64_t doubleTapLastUs = 0;
 bool doubleTapAboveThresh = false;
 // Decompression
-DecoResult lastDecoResult = {false, 0.0f, 0, 0, 0.0f};
+DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_US = 0;
 
 // Compass Labels
@@ -580,9 +585,9 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
   display.drawFastVLine(col4X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
   // Surface GF colour
   uint16_t surfGfColor = ST77XX_GREEN;
-  if (deco.surfGF > 100.0f) {
+  if (deco.surfGF > 100) {
     surfGfColor = ST77XX_RED;
-  } else if (deco.surfGF > 85.0f) {
+  } else if (deco.surfGF > 85) {
     surfGfColor = ST77XX_YELLOW;
   }
 
@@ -598,7 +603,7 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
     display.print(ttsStr);
     // Surface GF at bottom right
     char surfGfStr[16];
-    snprintf(surfGfStr, sizeof(surfGfStr), "sGF:%.0f%%", deco.surfGF);
+    snprintf(surfGfStr, sizeof(surfGfStr), "sGF:%u%%", deco.surfGF);
     int16_t sx1 = 0, sy1 = 0;
     uint16_t sw = 0, sh = 0;
     display.setTextSize(3);
@@ -613,10 +618,10 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
     drawColCentreText("TTS", col3X, col3W, 66, 2, ST77XX_CYAN);
     drawColCentreText("sGF", col4X, col4W, 66, 2, ST77XX_CYAN);
     char stopStr[8], timeStr[8], ttsStr[8], surfGfValStr[8];
-    snprintf(stopStr, sizeof(stopStr), "%dm", (int)deco.nextStopDepth);
+    snprintf(stopStr, sizeof(stopStr), "%um", deco.nextStopDepth);
     snprintf(timeStr, sizeof(timeStr), "%dm", deco.stopTime);
     snprintf(ttsStr, sizeof(ttsStr), "%dm", deco.timeToSurface);
-    snprintf(surfGfValStr, sizeof(surfGfValStr), "%.0f%%", deco.surfGF);
+    snprintf(surfGfValStr, sizeof(surfGfValStr), "%u%%", deco.surfGF);
     drawColCentreText(stopStr, col1X, col1W, 94, 3, ST77XX_WHITE);
     drawColCentreText(timeStr, col2X, col2W, 94, 3, ST77XX_WHITE);
     drawColCentreText(ttsStr, col3X, col3W, 94, 3, ST77XX_WHITE);
@@ -652,8 +657,8 @@ void setup() {
   compassInit(SDA_Pin, SCL_Pin);
 
   // ZHL-16C Initialisation
+  decoSetup(GF_Low, GF_High, Setpoint);
   decoInit();
-  mad_man_mode(false);
   Deco_Last_Update_US = static_cast<uint64_t>(esp_timer_get_time());
 
   // Display Initialisation
