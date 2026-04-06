@@ -90,6 +90,21 @@ static float ceilDepth(const float n2[], float gf) {
     return (d < 0.0f) ? 0.0f : d;
 }
 
+// Surface GF
+static float surfaceGfPercent(const float n2[]) {
+    float maxGf = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        const float p = n2[i];
+        if (p <= 0.0f) continue;
+        const float denom = kA[i] + SURFACE_ATM / kB[i] - SURFACE_ATM;
+        if (denom <= 0.0f) continue;
+        const float gf = (p - SURFACE_ATM) / denom;
+        if (gf > maxGf) maxGf = gf;
+    }
+    if (maxGf < 0.0f) maxGf = 0.0f;
+    return maxGf * 100.0f;
+}
+
 // GF Interpolation
 static float gfAt(float depth, float dFirst) {
     if (dFirst <= 0.0f) return GF_HIGH;
@@ -135,6 +150,9 @@ DecoResult decoCompute(float currentPressureAtm) {
     float n2[16];
     memcpy(n2, N2, sizeof(n2));
 
+    // Calculate surface GF
+    const float surfGF = surfaceGfPercent(n2);
+
     // Find the deepest stop
     const float firstCeilGf = sanity ? GF_LOW : 1.0f;
     const float rawCeil = ceilDepth(n2, firstCeilGf);
@@ -145,7 +163,7 @@ DecoResult decoCompute(float currentPressureAtm) {
 
     // NDL
     if (dFirst < 0.01f) {
-        return {false, 0.0f, 0, (int)ceilf(currentDepthM / ASCENT_RATE)};
+        return {false, 0.0f, 0, (int)ceilf(currentDepthM / ASCENT_RATE), surfGF};
     }
     int totalMin = 0;
 
@@ -184,5 +202,5 @@ DecoResult decoCompute(float currentPressureAtm) {
         simAscent(n2, dStop, dNext, &totalMin);
         dStop = dNext;
     }
-    return {true, dFirst, firstStopMin, totalMin};
+    return {true, dFirst, firstStopMin, totalMin, surfGF};
 }

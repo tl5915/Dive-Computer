@@ -52,7 +52,7 @@ constexpr uint8_t Backlight_High = 255;                // High backlight in brig
 constexpr uint32_t Message_US = 2000000;               // Display messages for 2 seconds
 constexpr uint32_t Bottom_Timer_Loop_US = 100000;      // Bottom timer mode: 10 Hz display refresh rate
 constexpr uint32_t Dive_Computer_Loop_US = 1000000;    // Dive computer mode: 1 Hz display refresh rate
-constexpr uint32_t Deco_Compute_Period_US = 10000000;  // Recompute decompression every 10 seconds
+constexpr uint32_t Deco_Update_Period_US = 10000000;   // Update tissue model every 10 seconds
 
 // Tap Detection Constants
 constexpr float Tap_Threshold_G = 2.0f;          // Acceleration spike threshold
@@ -71,36 +71,42 @@ constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
 // Variables
 enum DisplayMode : uint8_t { MODE_BOTTOM_TIMER, MODE_DIVE_COMPUTER };
-static DisplayMode currentMode = MODE_BOTTOM_TIMER;
+uint64_t Dive_Display_US = 0;
+uint16_t Loop_Usage_Percent = 0;
+// Modes
+DisplayMode currentMode = MODE_BOTTOM_TIMER;
+bool Mad_Man_Mode = false;
+bool Mad_Man_Pending = false;
+// Dive metrics
 float Depth = 0.0f;
 float Heading = 0.0f;
-float Battery_Voltage = 0.0f;
-uint8_t Battery_Percentage = 0;
-uint64_t Timer_Start_US = 0;
-bool Dive_Timer_Started = false;
 int Minutes = 0;
 int Seconds = 0;
+bool Dive_Timer_Started = false;
+uint64_t Timer_Start_US = 0;
+// Battery
+float Battery_Voltage = 0.0f;
+uint8_t Battery_Percentage = 0;
 float Ambient_Lux = 0.0f;
 uint8_t Backlight_Level = Backlight_High;
+// Calibration button
 bool Calibration_Armed = false;
 uint64_t Calibration_Start_US = 0;
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_US = 0;
-static uint8_t tripleTapCount = 0;
-static uint64_t tripleTapFirstUs = 0;
-static uint64_t tripleTapLastUs = 0;
-static bool tripleTapAboveThresh = false;
-static uint8_t doubleTapCount = 0;
-static uint64_t doubleTapFirstUs = 0;
-static uint64_t doubleTapLastUs = 0;
-static bool doubleTapAboveThresh = false;
-static bool Mad_Man_Mode = false;
-static bool Mad_Man_Pending = false;
-static DecoResult lastDecoResult= {false, 0.0f, 0, 0};
-static uint64_t Deco_Last_Update_US = 0;
-static uint64_t Deco_Compute_US = 0;
-static uint64_t Dive_Display_US = 0;
+// Tap detection
+uint8_t tripleTapCount = 0;
+uint64_t tripleTapFirstUs = 0;
+uint64_t tripleTapLastUs = 0;
+bool tripleTapAboveThresh = false;
+uint8_t doubleTapCount = 0;
+uint64_t doubleTapFirstUs = 0;
+uint64_t doubleTapLastUs = 0;
+bool doubleTapAboveThresh = false;
+// Decompression
+DecoResult lastDecoResult = {false, 0.0f, 0, 0, 0.0f};
+uint64_t Deco_Last_Update_US = 0;
 
 // Compass Labels
 struct CompassLabel {
@@ -130,7 +136,7 @@ void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colo
   display.print(text);
 }
 
-static void drawColCentreText(const char *text, int16_t colX, int16_t colW,
+void drawColCentreText(const char *text, int16_t colX, int16_t colW,
                                int16_t y, uint8_t textSize, uint16_t colour) {
   int16_t x1 = 0, y1 = 0;
   uint16_t w = 0, h = 0;
@@ -387,7 +393,7 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   const int16_t unitX = decimalX + static_cast<int16_t>(decimalW) + 2;
   const int16_t unitY = depthBottom - static_cast<int16_t>(unitH);
 
-  // Draw depth block on top-left.
+  // Draw depth block on top-left
   display.setTextColor(ST77XX_WHITE);
   display.setTextSize(integerSize);
   display.setCursor(depthX, depthY);
@@ -407,11 +413,24 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   display.setCursor(unitX, unitY);
   display.print(unitPart);
 
-  // Draw battery indicator on top-right.
+  // Draw battery indicator on top-right
   const int16_t rightEdge = screenW - 8;
   drawBatteryIndicator(rightEdge, 10, Battery_Percentage);
 
-  // Draw timer below battery indicator.
+  // Draw loop usage percent under battery (% of 100 ms)
+  char loopUsageStr[8];
+  snprintf(loopUsageStr, sizeof(loopUsageStr), "%u%%", Loop_Usage_Percent);
+  display.setTextSize(2);
+  display.setTextColor(ST77XX_CYAN);
+  {
+    int16_t ux1 = 0, uy1 = 0;
+    uint16_t uW = 0, uH = 0;
+    display.getTextBounds(loopUsageStr, 0, 0, &ux1, &uy1, &uW, &uH);
+    display.setCursor(rightEdge - static_cast<int16_t>(uW), 29);
+    display.print(loopUsageStr);
+  }
+
+  // Draw timer below battery indicator
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3d:%02d", Minutes, Seconds);
   display.setTextSize(4);
@@ -507,9 +526,22 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
   display.print("m");
 
   // Battery indicator at top-right
-  drawBatteryIndicator(LCD_Width - 8, 5, Battery_Percentage);
+  drawBatteryIndicator((LCD_Width - 8), 5, Battery_Percentage);
 
-  // Timer at mid right
+  // Loop usage percent under battery (% of 100 ms)
+  char loopUsageStr[8];
+  snprintf(loopUsageStr, sizeof(loopUsageStr), "%u%%", Loop_Usage_Percent);
+  display.setTextSize(2);
+  display.setTextColor(ST77XX_CYAN);
+  {
+    int16_t ux1 = 0, uy1 = 0;
+    uint16_t uW = 0, uH = 0;
+    display.getTextBounds(loopUsageStr, 0, 0, &ux1, &uy1, &uW, &uH);
+    display.setCursor(((LCD_Width - 8) - static_cast<int16_t>(uW)), 24);
+    display.print(loopUsageStr);
+  }
+
+  // Timer below battery and loop usage
   char timerStr[8];
   snprintf(timerStr, sizeof(timerStr), "%d:%02d", minutes, seconds);
   {
@@ -517,7 +549,7 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
     uint16_t tW = 0, tH = 0;
     display.setTextSize(3);
     display.getTextBounds(timerStr, 0, 0, &tx1, &ty1, &tW, &tH);
-    display.setCursor(LCD_Width - 8 - static_cast<int16_t>(tW), 28);
+    display.setCursor(LCD_Width - 8 - static_cast<int16_t>(tW), 44);
     display.setTextColor(ST77XX_WHITE);
     display.print(timerStr);
   }
@@ -538,32 +570,57 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
   constexpr int16_t divY = 58;
   display.drawFastHLine(0, divY, LCD_Width, ST77XX_WHITE);
 
-  // Three-column deco table
-  constexpr int16_t col1X = 0, col1W = 93;
-  constexpr int16_t col2X = 93, col2W = 93;
-  constexpr int16_t col3X = 186, col3W = 94;
+  // Deco section display
+  constexpr int16_t col1X = 0, col1W = 60;
+  constexpr int16_t col2X = 60, col2W = 60;
+  constexpr int16_t col3X = 120, col3W = 60;
+  constexpr int16_t col4X = 180, col4W = 60;
   display.drawFastVLine(col2X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
   display.drawFastVLine(col3X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
+  display.drawFastVLine(col4X, divY + 1, LCD_Height - divY - 1, ST77XX_WHITE);
+  // Surface GF colour
+  uint16_t surfGfColor = ST77XX_GREEN;
+  if (deco.surfGF > 100.0f) {
+    surfGfColor = ST77XX_RED;
+  } else if (deco.surfGF > 85.0f) {
+    surfGfColor = ST77XX_YELLOW;
+  }
 
   if (!deco.inDeco) {
-    drawCentreText("NO DECO", 105, 3, ST77XX_GREEN);
-    if (deco.timeToSurface > 0) {
-      char ttsStr[12];
-      snprintf(ttsStr, sizeof(ttsStr), "~%d min", deco.timeToSurface);
-      drawCentreText(ttsStr, 155, 2, ST77XX_CYAN);
-    }
+    // NO DECO at top centre
+    drawCentreText("NO DECO", 78, 4, ST77XX_GREEN);
+    // TTS at bottom left
+    char ttsStr[16];
+    snprintf(ttsStr, sizeof(ttsStr), "TTS:%d", deco.timeToSurface);
+    display.setTextSize(3);
+    display.setTextColor(ST77XX_CYAN);
+    display.setCursor(8, 210);
+    display.print(ttsStr);
+    // Surface GF at bottom right
+    char surfGfStr[16];
+    snprintf(surfGfStr, sizeof(surfGfStr), "sGF:%.0f%%", deco.surfGF);
+    int16_t sx1 = 0, sy1 = 0;
+    uint16_t sw = 0, sh = 0;
+    display.setTextSize(3);
+    display.getTextBounds(surfGfStr, 0, 0, &sx1, &sy1, &sw, &sh);
+    display.setTextColor(surfGfColor);
+    display.setCursor(LCD_Width - 8 - static_cast<int16_t>(sw), 210);
+    display.print(surfGfStr);
   } else {
+    // Full 4 column deco table
     drawColCentreText("STOP", col1X, col1W, 66, 2, ST77XX_CYAN);
     drawColCentreText("TIME", col2X, col2W, 66, 2, ST77XX_CYAN);
     drawColCentreText("TTS", col3X, col3W, 66, 2, ST77XX_CYAN);
-
-    char stopStr[8], timeStr[8], ttsStr[8];
+    drawColCentreText("sGF", col4X, col4W, 66, 2, ST77XX_CYAN);
+    char stopStr[8], timeStr[8], ttsStr[8], surfGfValStr[8];
     snprintf(stopStr, sizeof(stopStr), "%dm", (int)deco.nextStopDepth);
     snprintf(timeStr, sizeof(timeStr), "%dm", deco.stopTime);
     snprintf(ttsStr, sizeof(ttsStr), "%dm", deco.timeToSurface);
-    drawColCentreText(stopStr, col1X, col1W, 90, 4, ST77XX_WHITE);
-    drawColCentreText(timeStr, col2X, col2W, 90, 4, ST77XX_WHITE);
-    drawColCentreText(ttsStr, col3X, col3W, 90, 4, ST77XX_WHITE);
+    snprintf(surfGfValStr, sizeof(surfGfValStr), "%.0f%%", deco.surfGF);
+    drawColCentreText(stopStr, col1X, col1W, 94, 3, ST77XX_WHITE);
+    drawColCentreText(timeStr, col2X, col2W, 94, 3, ST77XX_WHITE);
+    drawColCentreText(ttsStr, col3X, col3W, 94, 3, ST77XX_WHITE);
+    drawColCentreText(surfGfValStr, col4X, col4W, 94, 3, surfGfColor);
   }
 }
 
@@ -638,7 +695,7 @@ void loop() {
       mad_man_mode(Mad_Man_Mode);
       Mad_Man_Pending = false;
       Dive_Display_US = loopStartUs - Dive_Computer_Loop_US;
-      Deco_Compute_US = loopStartUs - Deco_Compute_Period_US;
+      Deco_Last_Update_US = loopStartUs - Deco_Update_Period_US;
     }
   } else {
     Mad_Man_Pending = false;
@@ -647,7 +704,7 @@ void loop() {
   // Recalculate decompression when switched to dive computer mode
   if (modeChanged && currentMode == MODE_DIVE_COMPUTER) {
     Dive_Display_US = loopStartUs - Dive_Computer_Loop_US;
-    Deco_Compute_US = loopStartUs - Deco_Compute_Period_US;
+    Deco_Last_Update_US = loopStartUs - Deco_Update_Period_US;
   }
 
   // Compass Calibration
@@ -686,15 +743,14 @@ void loop() {
   Ambient_Lux = lightMeter.readLightLevel();
   Battery_Voltage = readBattery();
 
-  // ZHL16C Update
-  const float dtMin = static_cast<float>(loopStartUs - Deco_Last_Update_US) / 60000000.0f;
-  Deco_Last_Update_US = loopStartUs;
-  decoUpdate(pressureAtm, dtMin);
-
-  // Recalculate decompression every 10 seconds in dive computer mode
-  if (currentMode == MODE_DIVE_COMPUTER && (loopStartUs - Deco_Compute_US) >= Deco_Compute_Period_US) {
-    lastDecoResult = decoCompute(pressureAtm);
-    Deco_Compute_US = loopStartUs;
+  // ZHL-16C Update
+  if ((loopStartUs - Deco_Last_Update_US) >= Deco_Update_Period_US) {
+    const float dtMin = static_cast<float>(loopStartUs - Deco_Last_Update_US) / 60000000.0f;
+    Deco_Last_Update_US = loopStartUs;
+    decoUpdate(pressureAtm, dtMin);
+    if (currentMode == MODE_DIVE_COMPUTER) {
+      lastDecoResult = decoCompute(pressureAtm);
+    }
   }
 
   // Low Battery
@@ -725,6 +781,10 @@ void loop() {
     updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
   }
   const uint64_t elapsedUs = static_cast<uint64_t>(esp_timer_get_time()) - loopStartUs;
+  const uint64_t roundedUsage =
+      (elapsedUs * 100ULL + (static_cast<uint64_t>(Bottom_Timer_Loop_US) / 2ULL)) /
+      static_cast<uint64_t>(Bottom_Timer_Loop_US);
+  Loop_Usage_Percent = static_cast<uint16_t>((roundedUsage > 999ULL) ? 999ULL : roundedUsage);
   if (elapsedUs < static_cast<int64_t>(Bottom_Timer_Loop_US)) {
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(Bottom_Timer_Loop_US) - static_cast<uint64_t>(elapsedUs));
     esp_light_sleep_start();
