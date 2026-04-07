@@ -17,7 +17,7 @@
 #include <vector>
 #include <ZHL16C.h>
 #include <Preferences.h>
-#include "magnetometer_calibration.h"
+#include <magnetometer_calibration.h>
 
 
 // Pins
