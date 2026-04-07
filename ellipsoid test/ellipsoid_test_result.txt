@@ -1,0 +1,21 @@
+﻿25599 samples
+
+Reference_magnitude = 0.569
+
+Hard Iron bias (b):
+Bx = -0.021585
+By = 0.013339
+Bz = -0.026296
+
+Soft Iron matrix (A^-1):
+[  0.956688   -0.017959    0.006692]
+[ -0.017959    0.964393    0.003340]
+[  0.006692    0.003340    1.036579]
+
+Measured magnitude: 0.433603
+Reference magnitude: 0.569000
+Scale factor: 1.312262
+
+Validation:
+Mean = 0.568913
+Std = 0.009964

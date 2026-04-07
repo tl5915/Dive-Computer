@@ -113,7 +113,9 @@ bool doubleTapAboveThresh = false;
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_US = 0;
 
-// Compass Labels
+// Compass
+static void onCompassCalibrationStage(CompassCalibrationStage stage);
+
 struct CompassLabel {
   int degrees;
   const char *label;
@@ -323,6 +325,14 @@ bool calibrationButtonPressed(uint64_t nowUs) {
     }
   }
   return false;
+}
+
+// Compass Calibration Stage
+static void onCompassCalibrationStage(CompassCalibrationStage stage) {
+  if (stage == COMPASS_CAL_STAGE_COMPUTING) {
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Computing", 98, 4, ST77XX_CYAN);
+  }
 }
 
 
@@ -655,6 +665,7 @@ void setup() {
 
   // QMI8658 and QMC5883L Initialisation
   compassInit(SDA_Pin, SCL_Pin);
+  compassSetCalibrationStageCallback(onCompassCalibrationStage);
 
   // ZHL-16C Initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
@@ -720,21 +731,24 @@ void loop() {
   if (Calibration_Armed) {
     const uint64_t elapsedUs = loopStartUs - Calibration_Start_US;
     if (elapsedUs < Calibration_Delay_US) {
+      // Calibration start
       display.fillScreen(ST77XX_BLACK);
       drawCentreText("Compass", 70, 4, ST77XX_WHITE);
       drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
-      esp_sleep_enable_timer_wakeup(Bottom_Timer_Loop_US);
-      esp_light_sleep_start();
       return;
     }
+    // Data collection
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
     compassCalibrate();
+    // Calibration complete
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Done", 98, 4, ST77XX_GREEN);
+    drawCentreText(compassLastCalibrationMethod(), 140, 2, ST77XX_WHITE);
     esp_sleep_enable_timer_wakeup(Message_US);
     esp_light_sleep_start();
     Calibration_Armed = false;
+    return;
   }
 
   // Sensor Readings
