@@ -1,16 +1,23 @@
 #include <Arduino.h>
+// Power Management
+#include <esp_bt.h>
+#include <esp_wifi.h>
+#include <esp_timer.h>
+#include <esp_sleep.h>
+// Peripherals
 #include <SPI.h>
 #include <Wire.h>
 #include <BH1750.h>
 #include <MS5837.h>
-#include <ZHL16C.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
-#include <esp_bt.h>
-#include <esp_sleep.h>
-#include <esp_timer.h>
-#include <esp_wifi.h>
-#include "compass.h"
+#include <QMC5883LCompass.h>
+#include <SensorQMI8658.hpp>
+// Data Processing
+#include <vector>
+#include <ZHL16C.h>
+#include <Preferences.h>
+#include "magnetometer_calibration.h"
 
 
 // Pins
@@ -26,9 +33,12 @@ constexpr uint8_t SDA_Pin = 11;
 constexpr uint8_t Calibration_Button_Pin = 40;
 
 // Define Objects
+SPIClass spi(FSPI);
+Preferences prefs;
 MS5837 sensor;
 BH1750 lightMeter;
-SPIClass spi(FSPI);
+SensorQMI8658 qmi;
+QMC5883LCompass qmc;
 Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
 
 // Battery Percentage Lookup Table
@@ -54,6 +64,25 @@ constexpr uint32_t Bottom_Timer_Loop_US = 100000;      // Bottom timer mode: 10 
 constexpr uint32_t Dive_Computer_Loop_US = 1000000;    // Dive computer mode: 1 Hz display refresh rate
 constexpr uint32_t Deco_Update_Period_US = 10000000;   // Update tissue model every 10 seconds
 
+// QMC5883L Register Addresses
+constexpr uint8_t QMC5883L_I2C_Address = 0x0D;
+constexpr uint8_t QMC5883L_Status_Register = 0x06;
+constexpr uint8_t QMC5883L_Status_DRDY_Mask = 0x01;
+
+// Compass Constants
+constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
+constexpr float Magnetometer_Lsb_Per_Gauss = 3000.0f;         // QMC5883L at +/- 8 Gauss range: 3000 LSB/Gauss
+constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
+constexpr const char *Compass_NVS_Namespace = "compass";
+constexpr const char *Calibration_Valid_Key = "cal_valid";
+constexpr const char *Hard_Iron_X_Key = "hi_x";
+constexpr const char *Hard_Iron_Y_Key = "hi_y";
+constexpr const char *Hard_Iron_Z_Key = "hi_z";
+constexpr const char *Soft_Iron_Key = "soft_iron";
+constexpr const char *Reference_Mag_Gauss_Key = "ref_gauss";
+constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
+constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
+
 // Tap Detection Constants
 constexpr float Tap_Threshold_G = 2.0f;          // Acceleration spike threshold
 constexpr uint32_t Tap_Window_US = 2000000;      // 3 taps window 2 seconds
@@ -74,12 +103,12 @@ constexpr u_int8_t GF_Low = 60;
 constexpr u_int8_t GF_High = 85;
 constexpr float Setpoint = 1.2f;
 
-// Variables
+// Display
 enum DisplayMode : uint8_t { MODE_BOTTOM_TIMER, MODE_DIVE_COMPUTER };
+DisplayMode currentMode = MODE_BOTTOM_TIMER;
 uint64_t Dive_Display_US = 0;
 uint16_t Loop_Usage_Percent = 0;
 // Modes
-DisplayMode currentMode = MODE_BOTTOM_TIMER;
 bool ripNtear_Mode = false;
 bool ripNtear_Pending = false;
 // Dive metrics
@@ -112,10 +141,30 @@ bool doubleTapAboveThresh = false;
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_US = 0;
-
-// Compass
-static void onCompassCalibrationStage(CompassCalibrationStage stage);
-
+// Compass calibration
+CompassCalibrationMatrices Compass_Matrices = {};
+// Calibration method
+enum class CompassCalibrationMethod : uint8_t {
+  None = 0,
+  Ellipsoid = 1,
+  MinMax = 2,
+  Error = 3,
+};
+CompassCalibrationMethod Last_Calibration_Method = CompassCalibrationMethod::None;
+static const char* compassCalibrationMethodText(CompassCalibrationMethod method) {
+  switch (method) {
+    case CompassCalibrationMethod::Ellipsoid:
+      return "Ellipsoid";
+    case CompassCalibrationMethod::MinMax:
+      return "Min/Max";
+    case CompassCalibrationMethod::Error:
+      return "Error";
+    case CompassCalibrationMethod::None:
+    default:
+      return "None";
+  }
+}
+// Compass labels
 struct CompassLabel {
   int degrees;
   const char *label;
@@ -127,6 +176,172 @@ const CompassLabel Compass_Labels[] = {
     {270, "W"}, {300, "300"}, {330, "330"}
   };
 
+
+// QMC5883L Data Ready Check
+static bool qmc5883lDataReady() {
+  Wire.beginTransmission(QMC5883L_I2C_Address);
+  Wire.write(QMC5883L_Status_Register);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  const uint8_t count = Wire.requestFrom(
+      static_cast<uint8_t>(QMC5883L_I2C_Address),
+      static_cast<uint8_t>(1));
+  if (count != 1 || Wire.available() <= 0) {
+    return false;
+  }
+  const uint8_t status = static_cast<uint8_t>(Wire.read());
+  return (status & QMC5883L_Status_DRDY_Mask) != 0;
+}
+
+// Load Calibration
+static bool loadCompassCalibrationFromNVS() {
+  if (!prefs.begin(Compass_NVS_Namespace, true)) {
+    return false;
+  }
+  const bool valid = prefs.getBool(Calibration_Valid_Key, false);
+  if (!valid || !prefs.isKey(Hard_Iron_X_Key)) {
+    prefs.end();
+    return false;
+  }
+  CompassCalibrationMatrices loaded = {};
+  loaded.hard_iron[0] = prefs.getFloat(Hard_Iron_X_Key, 0.0f);
+  loaded.hard_iron[1] = prefs.getFloat(Hard_Iron_Y_Key, 0.0f);
+  loaded.hard_iron[2] = prefs.getFloat(Hard_Iron_Z_Key, 0.0f);
+  loaded.reference_field_gauss = prefs.getFloat(Reference_Mag_Gauss_Key, Reference_Field_Gauss);
+  loaded.lsb_per_gauss = prefs.getFloat(Lsb_Per_Gauss_Key, Magnetometer_Lsb_Per_Gauss);
+  loaded.fitted_field_lsb = prefs.getFloat(
+      Fitted_Field_Lsb_Key,
+      loaded.reference_field_gauss * loaded.lsb_per_gauss);
+  const size_t soft_iron_size = prefs.getBytesLength(Soft_Iron_Key);
+  if (soft_iron_size != (9U * sizeof(float))) {
+    prefs.end();
+    return false;
+  }
+  prefs.getBytes(Soft_Iron_Key, loaded.soft_iron, soft_iron_size);
+  loaded.is_valid = true;
+  prefs.end();
+  compassConfigureReferenceField(loaded.reference_field_gauss, loaded.lsb_per_gauss);
+  Compass_Matrices = loaded;
+  return compassSetCalibrationMatrices(&Compass_Matrices);
+}
+
+// Save Calibration
+static void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
+  if (!prefs.begin(Compass_NVS_Namespace, false)) {
+    return;
+  }
+  prefs.putFloat(Hard_Iron_X_Key, matrices.hard_iron[0]);
+  prefs.putFloat(Hard_Iron_Y_Key, matrices.hard_iron[1]);
+  prefs.putFloat(Hard_Iron_Z_Key, matrices.hard_iron[2]);
+  prefs.putBytes(Soft_Iron_Key, matrices.soft_iron, 9U * sizeof(float));
+  prefs.putFloat(Reference_Mag_Gauss_Key, matrices.reference_field_gauss);
+  prefs.putFloat(Lsb_Per_Gauss_Key, matrices.lsb_per_gauss);
+  prefs.putFloat(Fitted_Field_Lsb_Key, matrices.fitted_field_lsb);
+  prefs.putBool(Calibration_Valid_Key, matrices.is_valid);
+  prefs.end();
+}
+
+// Compass Initialisation
+static bool initCompassSensors(int sda, int scl) {
+  // QMI8658
+  qmi.begin(Wire, 0x6B, sda, scl);
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_2G,
+                          SensorQMI8658::ACC_ODR_125Hz,
+                          SensorQMI8658::LPF_MODE_2);
+  qmi.enableAccelerometer();
+  qmi.disableGyroscope();
+  // QMC5883L
+  qmc.init();
+  qmc.setMode(0x01, 0x08, 0x10, 0x00);  // Continuous mode; ODR 100 Hz; Range 8 Gauss, OSR 512
+  compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
+  if (!loadCompassCalibrationFromNVS()) {
+    Compass_Matrices = {};
+    compassSetCalibrationMatrices(nullptr);
+  }
+  return true;
+}
+
+// Read Accelerometer
+float readAccelMagnitude() {
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  qmi.getAccelerometer(ax, ay, az);
+  return sqrtf((ax * ax) + (ay * ay) + (az * az));
+}
+
+// Read Compass Heading
+static float readCompassHeading() {
+  // Tilt reading
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  qmi.getAccelerometer(ax, ay, az);
+  // Magnetometer reading
+  qmc.read();
+  const float raw_mag[3] = {
+      static_cast<float>(qmc.getX()),
+      static_cast<float>(qmc.getY()),
+      static_cast<float>(qmc.getZ())};
+  const float accel[3] = {ax, ay, az};
+  // Apply calibration and tilt compensation
+  float compensated[3] = {0.0f, 0.0f, 0.0f};
+  compassApplyCalibrationAndTiltCompensation(raw_mag, accel, compensated);
+  return compassHeadingFromMagneticVector(compensated);
+}
+
+// Compass Calibration - Data Collection
+static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
+  mag_samples_xyz.reserve(3U * 10000U);
+  const uint32_t start_ms = millis();
+  while ((millis() - start_ms) < Compass_Calibration_Duration_MS) {
+    if (qmc5883lDataReady()) {
+      qmc.read();
+      mag_samples_xyz.push_back(static_cast<float>(qmc.getX()));
+      mag_samples_xyz.push_back(static_cast<float>(qmc.getY()));
+      mag_samples_xyz.push_back(static_cast<float>(qmc.getZ()));
+    }
+  }
+  return true;
+}
+
+// Compass Calibration - Computation
+static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz) {
+  const size_t sample_count = mag_samples_xyz.size() / 3U;
+  if (sample_count < 50U) {
+    Last_Calibration_Method = CompassCalibrationMethod::Error;
+    return false;
+  }
+  CompassCalibrationMatrices fitted = {};
+  CompassCalibrationFitMethod fit_method = CompassCalibrationFitMethod::Error;
+  if (!compassCalibrateFromSamplesWithFallback(
+          mag_samples_xyz.data(),
+          sample_count,
+          &fitted,
+          &fit_method)) {
+    Last_Calibration_Method = CompassCalibrationMethod::Error;
+    return false;
+  }
+  Compass_Matrices = fitted;
+  if (!compassSetCalibrationMatrices(&Compass_Matrices)) {
+    Last_Calibration_Method = CompassCalibrationMethod::Error;
+    return false;
+  }
+  saveCompassCalibrationToNVS(Compass_Matrices);
+  switch (fit_method) {
+    case CompassCalibrationFitMethod::Ellipsoid:
+      Last_Calibration_Method = CompassCalibrationMethod::Ellipsoid;
+      break;
+    case CompassCalibrationFitMethod::MinMax:
+      Last_Calibration_Method = CompassCalibrationMethod::MinMax;
+      break;
+    default:
+      Last_Calibration_Method = CompassCalibrationMethod::Error;
+      break;
+  }
+  return true;
+}
 
 // Display Centre Text 
 void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colour) {
@@ -143,6 +358,7 @@ void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colo
   display.print(text);
 }
 
+// Display Column-Centred Text
 void drawColCentreText(const char *text, int16_t colX, int16_t colW,
                                int16_t y, uint8_t textSize, uint16_t colour) {
   int16_t x1 = 0, y1 = 0;
@@ -155,7 +371,6 @@ void drawColCentreText(const char *text, int16_t colX, int16_t colW,
   display.setTextColor(colour);
   display.print(text);
 }
-
 
 // Timer
 void updateTimer(float Depth, uint64_t nowUs) {
@@ -170,7 +385,6 @@ void updateTimer(float Depth, uint64_t nowUs) {
   }
 }
 
-
 // Battery Voltage
 float readBattery() {
   constexpr uint8_t sampleCount = 16;
@@ -181,7 +395,6 @@ float readBattery() {
   float voltage = (millivoltSum / sampleCount) / 1000.0f * Battery_Divider_Ratio;
   return voltage;
 }
-
 
 // Battery Percentage
 uint8_t batteryPercentage(float Battery_Voltage) {
@@ -203,7 +416,6 @@ uint8_t batteryPercentage(float Battery_Voltage) {
   return 0;
 }
 
-
 // Battery Indicator
 void drawBatteryIndicator(int16_t rightEdgeX, int16_t topY, uint8_t percentage) {
   uint16_t fillColor = ST77XX_GREEN;
@@ -224,8 +436,7 @@ void drawBatteryIndicator(int16_t rightEdgeX, int16_t topY, uint8_t percentage) 
   display.fillRect(outlineX + padding, outlineY + padding, fillWidth, outlineH - (padding * 2), fillColor);
 }
 
-
-// Compass
+// Compass Display
 void drawCompassBanner(int16_t x, int16_t y, int16_t w, int16_t h, float direction) {
   const int16_t centerX = x + (w / 2);
   const float pixelsPerDegree = static_cast<float>(w) / 120.0f;
@@ -290,6 +501,7 @@ void drawCompassBanner(int16_t x, int16_t y, int16_t w, int16_t h, float directi
   display.drawLine(centerX, topLineY + 8, centerX, bottomLineY - 1, ST77XX_CYAN);
 }
 
+// Heading Display
 void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
   int heading = static_cast<int>(direction + 0.5f);
   if (heading == 360) {
@@ -307,7 +519,6 @@ void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
   display.setTextColor(ST77XX_CYAN);
   display.print(headingString);
 }
-
 
 // Compass Calibration Button
 bool calibrationButtonPressed(uint64_t nowUs) {
@@ -327,15 +538,6 @@ bool calibrationButtonPressed(uint64_t nowUs) {
   return false;
 }
 
-// Compass Calibration Stage
-static void onCompassCalibrationStage(CompassCalibrationStage stage) {
-  if (stage == COMPASS_CAL_STAGE_COMPUTING) {
-    display.fillScreen(ST77XX_BLACK);
-    drawCentreText("Computing", 98, 4, ST77XX_CYAN);
-  }
-}
-
-
 // Backlight Level
 uint8_t ambientBacklightLevel(float lux) {
   if (lux <= 0.0f) {
@@ -347,11 +549,8 @@ uint8_t ambientBacklightLevel(float lux) {
   return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
-
 // Bottom Timer Display Update
 void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage) {
-  Battery_Percentage = batteryPercentage(Battery_Voltage);
-
   display.fillScreen(ST77XX_BLACK);
   const int16_t screenW = display.width();
   const int16_t screenH = display.height();
@@ -369,12 +568,10 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   const char *unitPart = "m";
   snprintf(integerPart, sizeof(integerPart), "%d", depthInteger);
   snprintf(decimalPart, sizeof(decimalPart), "%d", depthDecimal);
-
   constexpr uint8_t integerSize = 15;
   constexpr uint8_t decimalSize = 7;
   constexpr uint8_t dotSize = 4;
   const char *dotPart = ".";
-
   int16_t x1 = 0;
   int16_t y1 = 0;
   uint16_t integerW = 0;
@@ -385,19 +582,14 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   uint16_t unitH = 0;
   uint16_t dotW = 0;
   uint16_t dotH = 0;
-
   display.setTextSize(integerSize);
   display.getTextBounds(integerPart, 0, 0, &x1, &y1, &integerW, &integerH);
-
   display.setTextSize(decimalSize);
   display.getTextBounds(decimalPart, 0, 0, &x1, &y1, &decimalW, &decimalH);
-
   display.setTextSize(decimalSize);
   display.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
-
   display.setTextSize(dotSize);
   display.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
-
   const int16_t depthX = 6;
   const int16_t depthY = 6;
   const int16_t depthBottom = depthY + static_cast<int16_t>(integerH);
@@ -413,16 +605,13 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   display.setTextSize(integerSize);
   display.setCursor(depthX, depthY);
   display.print(integerPart);
-
   display.setTextColor(ST77XX_WHITE);
   display.setTextSize(dotSize);
   display.setCursor(dotX, dotY);
   display.print(dotPart);
-
   display.setTextSize(decimalSize);
   display.setCursor(decimalX, decimalY);
   display.print(decimalPart);
-
   display.setTextColor(ST77XX_CYAN);
   display.setTextSize(decimalSize);
   display.setCursor(unitX, unitY);
@@ -461,7 +650,6 @@ void updateDisplay(float Depth, int Minutes, int Seconds, float Battery_Voltage)
   drawCompassBanner(0, compassY, screenW, compassH, Heading);
 }
 
-
 // Triple-tap
 bool detectTripleTap(uint64_t nowUs) {
   const float mag = readAccelMagnitude();
@@ -490,7 +678,6 @@ bool detectTripleTap(uint64_t nowUs) {
   }
   return false;
 }
-
 
 // Double-tap
 bool detectDoubleTap(uint64_t nowUs) {
@@ -521,10 +708,8 @@ bool detectDoubleTap(uint64_t nowUs) {
   return false;
 }
 
-
 // Dive Computer Display Update
 void updateDiveComputerDisplay(float depth, int minutes, int seconds, float battVoltage, const DecoResult &deco) {
-  Battery_Percentage = batteryPercentage(battVoltage);
   display.fillScreen(ST77XX_BLACK);
 
   // Depth at top-left
@@ -585,7 +770,7 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
   constexpr int16_t divY = 58;
   display.drawFastHLine(0, divY, LCD_Width, ST77XX_WHITE);
 
-  // Deco section display
+  // Deco section
   constexpr int16_t col1X = 0, col1W = 60;
   constexpr int16_t col2X = 60, col2W = 60;
   constexpr int16_t col3X = 120, col3W = 60;
@@ -600,7 +785,7 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
   } else if (deco.surfGF > 85) {
     surfGfColor = ST77XX_YELLOW;
   }
-
+  // Deco display
   if (!deco.inDeco) {
     // NO DECO at top centre
     drawCentreText("NO DECO", 78, 4, ST77XX_GREEN);
@@ -664,8 +849,7 @@ void setup() {
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE);  // 4 lux, 16 ms
 
   // QMI8658 and QMC5883L Initialisation
-  compassInit(SDA_Pin, SCL_Pin);
-  compassSetCalibrationStageCallback(onCompassCalibrationStage);
+  initCompassSensors(SDA_Pin, SCL_Pin);
 
   // ZHL-16C Initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
@@ -730,39 +914,58 @@ void loop() {
   }
   if (Calibration_Armed) {
     const uint64_t elapsedUs = loopStartUs - Calibration_Start_US;
+    // Start Calibration
     if (elapsedUs < Calibration_Delay_US) {
-      // Calibration start
       display.fillScreen(ST77XX_BLACK);
       drawCentreText("Compass", 70, 4, ST77XX_WHITE);
       drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
+      delay(100);
       return;
     }
     // Data collection
     display.fillScreen(ST77XX_BLACK);
     drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
-    compassCalibrate();
+    std::vector<float> mag_samples_xyz;
+    collectCompassSamples(mag_samples_xyz);
+    // Computing calibration
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
+    const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
     // Calibration complete
     display.fillScreen(ST77XX_BLACK);
-    drawCentreText("Done", 98, 4, ST77XX_GREEN);
-    drawCentreText(compassLastCalibrationMethod(), 140, 2, ST77XX_WHITE);
+    if (calibration_ok) {
+      drawCentreText("Done", 98, 4, ST77XX_GREEN);
+    } else {
+      drawCentreText("Failed", 98, 4, ST77XX_RED);
+    }
+    drawCentreText(compassCalibrationMethodText(Last_Calibration_Method), 140, 2, ST77XX_WHITE);
     esp_sleep_enable_timer_wakeup(Message_US);
     esp_light_sleep_start();
     Calibration_Armed = false;
     return;
   }
 
-  // Sensor Readings
+  // Depth
   sensor.read();
   const float pressureAtm = sensor.pressure() / MBAR_PER_ATM;
   Depth = sensor.depth() - Depth_Offset;  // Sea level offset
   if (Depth < 0.0f) Depth = 0.0f;         // Minimum depth 0 meter
   if (Depth > 99.9f) Depth = 99.9f;       // Maximum depth 99.9 meters
-  updateTimer(Depth, loopStartUs);
-  Heading = readHeading();
-  Ambient_Lux = lightMeter.readLightLevel();
-  Battery_Voltage = readBattery();
 
-  // ZHL-16C Update
+  // Timer
+  updateTimer(Depth, loopStartUs);
+
+  // Compass
+  Heading = readCompassHeading();
+
+  // Backlight
+  Ambient_Lux = lightMeter.readLightLevel();
+
+  // Battery
+  Battery_Voltage = readBattery();
+  Battery_Percentage = batteryPercentage(Battery_Voltage);
+
+  // ZHL-16C
   if ((loopStartUs - Deco_Last_Update_US) >= Deco_Update_Period_US) {
     const float dtMin = static_cast<float>(loopStartUs - Deco_Last_Update_US) / 60000000.0f;
     Deco_Last_Update_US = loopStartUs;
@@ -799,11 +1002,15 @@ void loop() {
   } else {
     updateDisplay(Depth, Minutes, Seconds, Battery_Voltage);
   }
+
+  // Loop Usage
   const uint64_t elapsedUs = static_cast<uint64_t>(esp_timer_get_time()) - loopStartUs;
   const uint64_t roundedUsage =
       (elapsedUs * 100ULL + (static_cast<uint64_t>(Bottom_Timer_Loop_US) / 2ULL)) /
       static_cast<uint64_t>(Bottom_Timer_Loop_US);
   Loop_Usage_Percent = static_cast<uint16_t>((roundedUsage > 999ULL) ? 999ULL : roundedUsage);
+
+  // Loop Interval
   if (elapsedUs < static_cast<int64_t>(Bottom_Timer_Loop_US)) {
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(Bottom_Timer_Loop_US) - static_cast<uint64_t>(elapsedUs));
     esp_light_sleep_start();

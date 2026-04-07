@@ -82,7 +82,7 @@ def calibrate_ellipsoid(samples, reference_mag):
 
 # Test
 data = np.loadtxt(
-    r"C:\Users\TL\Documents\PlatformIO\Projects\Bottom Timer V2\mag.txt"
+    r"*\test_data.txt"
 )
 print(f"{len(data)} samples")
 
