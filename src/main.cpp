@@ -164,6 +164,7 @@ static const char* compassCalibrationMethodText(CompassCalibrationMethod method)
       return "None";
   }
 }
+CompassCalibrationQuality Last_Calibration_Quality = {};
 // Compass labels
 struct CompassLabel {
   int degrees;
@@ -340,6 +341,9 @@ static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz)
       Last_Calibration_Method = CompassCalibrationMethod::Error;
       break;
   }
+  Last_Calibration_Quality = {};
+  compassScoreCalibrationQuality(
+      mag_samples_xyz.data(), sample_count, &Compass_Matrices, &Last_Calibration_Quality);
   return true;
 }
 
@@ -518,6 +522,49 @@ void drawHeadingValue(int16_t x, int16_t y, int16_t w, float direction) {
   display.setCursor(x + ((w - static_cast<int16_t>(textW)) / 2), y + 2);
   display.setTextColor(ST77XX_CYAN);
   display.print(headingString);
+}
+
+// Calibration Score Display
+static void drawCalibrationScore() {
+  display.fillScreen(ST77XX_BLACK);
+  drawCentreText("Calibration Result", 15, 2, ST77XX_WHITE);
+  if (!Last_Calibration_Quality.is_valid) {
+    drawCentreText("N/A", 85, 4, ST77XX_RED);
+    return;
+  }
+  // Score percentage colour
+  const int score = static_cast<int>(Last_Calibration_Quality.score_percent + 0.5f);
+  uint16_t score_colour;
+  if (score >= 80) {
+    score_colour = ST77XX_GREEN;
+  } else if (score >= 60) {
+    score_colour = ST77XX_YELLOW;
+  } else if (score >= 40) {
+    score_colour = ST77XX_ORANGE;
+  } else {
+    score_colour = ST77XX_RED;
+  }
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%d%%", score);
+  drawCentreText(buf, 50, 3, score_colour);
+  snprintf(buf, sizeof(buf), "%u Sample Count: ",
+           static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
+  drawCentreText(buf, 100, 2, ST77XX_CYAN);
+  snprintf(buf, sizeof(buf), "Span:  %d%%",
+           static_cast<int>(Last_Calibration_Quality.raw_span_score + 0.5f));
+  drawCentreText(buf, 138, 1, ST77XX_WHITE);
+  snprintf(buf, sizeof(buf), "Oct:   %d%%",
+           static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
+  drawCentreText(buf, 150, 1, ST77XX_WHITE);
+  snprintf(buf, sizeof(buf), "PCA: %d%%",
+           static_cast<int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
+  drawCentreText(buf, 162, 1, ST77XX_WHITE);
+  snprintf(buf, sizeof(buf), "Residual: %d%%",
+           static_cast<int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
+  drawCentreText(buf, 174, 1, ST77XX_WHITE);
+  snprintf(buf, sizeof(buf), "Rad Std:   %d%%",
+           static_cast<int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
+  drawCentreText(buf, 186, 1, ST77XX_WHITE);
 }
 
 // Compass Calibration Button
@@ -940,6 +987,9 @@ void loop() {
     }
     drawCentreText(compassCalibrationMethodText(Last_Calibration_Method), 140, 2, ST77XX_WHITE);
     esp_sleep_enable_timer_wakeup(Message_US);
+    esp_light_sleep_start();
+    drawCalibrationScore();
+    esp_sleep_enable_timer_wakeup(Message_US * 3);
     esp_light_sleep_start();
     Calibration_Armed = false;
     return;
