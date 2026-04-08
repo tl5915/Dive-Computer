@@ -1,7 +1,10 @@
-# Bottom Timer / Dive Computer V2
+# Dive Computer
 
-Add compass display. Enable dive computer mode with Bühlmann zhl-16c algorithm.
-Pressure sensor and housing is the same as the [previous version](https://github.com/tl5915/Bottom-Timer-for-DPV).
+Based on the previous [bottom timer project]([https://](https://github.com/tl5915/Bottom-Timer-for-DPV)). Pressure sensor and housing remains the same.
+
+- Add dive computer mode with Bühlmann ZHL-16C algorithm
+- Add tilt compensated digital compass with soft and hard iron calibration
+- Backlight auto adjustment
 
 ## Hardware
 
@@ -13,16 +16,18 @@ Pressure sensor and housing is the same as the [previous version](https://github
 
 ## Software
 
-- Press onboard button to start compass calibration, rotate in all directions in 30 seconds
+- Press onboard button to start compass calibration, rotate in all directions in 60 seconds
 - Dive timer start at 1m depth
 - Default bottom timer view with digital compass
-- Triple tap to switch to dive computer mode: stop, time, TTS
-- In dive computer mode, double tap to change gradient factor to 100/100 (**Emergency Only**)
+- Triple tap to switch to dive computer mode:
+  
+  | Stop | Time | TTS | surfGF |
+- In dive computer mode, double tap to change gradient factor to `100/100`
 
 ### Decompression model assumptions
 
-- Fixed gradient factor 60/85 (optional 100/100)
-- Close circuit with fixed set point of 1.2
+- Fixed gradient factor `60/85` (optional overide)
+- Close circuit with fixed set point of `1.2`
 - Ascent rate 9 m/min
 - Sea level 1 atm
 - No prior dives
