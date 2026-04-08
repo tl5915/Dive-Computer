@@ -22,6 +22,7 @@
 
 // Pins
 constexpr uint8_t Battery_Pin = 1;
+constexpr uint8_t DRDY_Pin = 2;
 constexpr uint8_t DC_Pin = 4;
 constexpr uint8_t CS_Pin = 5;
 constexpr uint8_t SCK_Pin = 6;
@@ -30,10 +31,15 @@ constexpr uint8_t RST_Pin = 8;
 constexpr uint8_t Backlight_Pin = 15;
 constexpr uint8_t SCL_Pin = 10;
 constexpr uint8_t SDA_Pin = 11;
+constexpr uint8_t Sensor_VCC_Pin = 3;
+constexpr uint8_t Sensor_GND_Pin = 16;
+constexpr uint8_t Sensor_SCL_Pin = 17;
+constexpr uint8_t Sensor_SDA_Pin = 18;
 constexpr uint8_t Calibration_Button_Pin = 40;
 
 // Define Objects
 SPIClass spi(FSPI);
+TwoWire sensorWire(1);
 Preferences prefs;
 MS5837 sensor;
 BH1750 lightMeter;
@@ -64,11 +70,6 @@ constexpr uint32_t Bottom_Timer_Loop_US = 100000;      // Bottom timer mode: 10 
 constexpr uint32_t Dive_Computer_Loop_US = 1000000;    // Dive computer mode: 1 Hz display refresh rate
 constexpr uint32_t Deco_Update_Period_US = 10000000;   // Update tissue model every 10 seconds
 
-// QMC5883L Register Addresses
-constexpr uint8_t QMC5883L_I2C_Address = 0x0D;
-constexpr uint8_t QMC5883L_Status_Register = 0x06;
-constexpr uint8_t QMC5883L_Status_DRDY_Mask = 0x01;
-
 // Compass Constants
 constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
 constexpr float Magnetometer_Lsb_Per_Gauss = 3000.0f;         // QMC5883L at +/- 8 Gauss range: 3000 LSB/Gauss
@@ -97,6 +98,12 @@ constexpr uint16_t Density = 1020;        // EN13319 density
 constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
 constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
 constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
+
+// --- TESTING --- //
+constexpr uint8_t MS5837_I2C_Address = 0x76;
+constexpr float Fake_Depth_Meters = 50.0f;
+bool Pressure_Sensor_Available = false;
+// --- TESTING --- //
 
 // Decompression Constants
 constexpr u_int8_t GF_Low = 60;
@@ -178,22 +185,27 @@ const CompassLabel Compass_Labels[] = {
   };
 
 
-// QMC5883L Data Ready Check
-static bool qmc5883lDataReady() {
-  Wire.beginTransmission(QMC5883L_I2C_Address);
-  Wire.write(QMC5883L_Status_Register);
-  if (Wire.endTransmission(false) != 0) {
-    return false;
-  }
-  const uint8_t count = Wire.requestFrom(
-      static_cast<uint8_t>(QMC5883L_I2C_Address),
-      static_cast<uint8_t>(1));
-  if (count != 1 || Wire.available() <= 0) {
-    return false;
-  }
-  const uint8_t status = static_cast<uint8_t>(Wire.read());
-  return (status & QMC5883L_Status_DRDY_Mask) != 0;
+// --- TESTING --- //
+static bool isMs5837Present() {
+  sensorWire.beginTransmission(MS5837_I2C_Address);
+  return sensorWire.endTransmission() == 0;
 }
+static float depthToPressureMbar(float depth_m) {
+  const float hydrostatic_pa = static_cast<float>(Density) * 9.80665f * depth_m;
+  return MBAR_PER_ATM + (hydrostatic_pa / 100.0f);
+}
+static void readDepthAndPressure(float& depth_m, float& pressure_mbar) {
+  if (Pressure_Sensor_Available) {
+    sensor.read();
+    pressure_mbar = sensor.pressure();
+    depth_m = sensor.depth() - Depth_Offset;
+  } else {
+    depth_m = Fake_Depth_Meters;
+    pressure_mbar = depthToPressureMbar(Fake_Depth_Meters + Depth_Offset);
+  }
+}
+// --- TESTING --- //
+
 
 // Load Calibration
 static bool loadCompassCalibrationFromNVS() {
@@ -253,6 +265,7 @@ static bool initCompassSensors(int sda, int scl) {
   qmi.enableAccelerometer();
   qmi.disableGyroscope();
   // QMC5883L
+  pinMode(DRDY_Pin, INPUT);
   qmc.init();
   qmc.setMode(0x01, 0x08, 0x10, 0x00);  // Continuous mode; ODR 100 Hz; Range 8 Gauss, OSR 512
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
@@ -272,6 +285,13 @@ float readAccelMagnitude() {
   return sqrtf((ax * ax) + (ay * ay) + (az * az));
 }
 
+// Remap QMC5883L axes to match QMI8658
+static void convertQmcToQmiAxes(float qmc_x, float qmc_y, float qmc_z, float out_mag[3]) {
+  out_mag[0] = -qmc_y;  // X_qmi = -Y_qmc
+  out_mag[1] = qmc_x;   // Y_qmi = X_qmc
+  out_mag[2] = qmc_z;   // Z_qmi = Z_qmc
+}
+
 // Read Compass Heading
 static float readCompassHeading() {
   // Tilt reading
@@ -281,10 +301,11 @@ static float readCompassHeading() {
   qmi.getAccelerometer(ax, ay, az);
   // Magnetometer reading
   qmc.read();
-  const float raw_mag[3] = {
-      static_cast<float>(qmc.getX()),
-      static_cast<float>(qmc.getY()),
-      static_cast<float>(qmc.getZ())};
+  const float qmc_x = static_cast<float>(qmc.getX());
+  const float qmc_y = static_cast<float>(qmc.getY());
+  const float qmc_z = static_cast<float>(qmc.getZ());
+  float raw_mag[3] = {0.0f, 0.0f, 0.0f};
+  convertQmcToQmiAxes(qmc_x, qmc_y, qmc_z, raw_mag);
   const float accel[3] = {ax, ay, az};
   // Apply calibration and tilt compensation
   float compensated[3] = {0.0f, 0.0f, 0.0f};
@@ -297,11 +318,16 @@ static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
   mag_samples_xyz.reserve(3U * 10000U);
   const uint32_t start_ms = millis();
   while ((millis() - start_ms) < Compass_Calibration_Duration_MS) {
-    if (qmc5883lDataReady()) {
+    if (digitalRead(DRDY_Pin) == HIGH) {
       qmc.read();
-      mag_samples_xyz.push_back(static_cast<float>(qmc.getX()));
-      mag_samples_xyz.push_back(static_cast<float>(qmc.getY()));
-      mag_samples_xyz.push_back(static_cast<float>(qmc.getZ()));
+      const float qmc_x = static_cast<float>(qmc.getX());
+      const float qmc_y = static_cast<float>(qmc.getY());
+      const float qmc_z = static_cast<float>(qmc.getZ());
+      float raw_mag[3] = {0.0f, 0.0f, 0.0f};
+      convertQmcToQmiAxes(qmc_x, qmc_y, qmc_z, raw_mag);
+      mag_samples_xyz.push_back(raw_mag[0]);
+      mag_samples_xyz.push_back(raw_mag[1]);
+      mag_samples_xyz.push_back(raw_mag[2]);
     }
   }
   return true;
@@ -873,7 +899,7 @@ void updateDiveComputerDisplay(float depth, int minutes, int seconds, float batt
 
 
 void setup() {
-  // Power Conservation
+  // Power conservation
   esp_wifi_stop();              // WiFi off
   esp_bt_controller_disable();  // Bluetooth off
   setCpuFrequencyMhz(80);       // Reduce CPU frequency
@@ -883,27 +909,49 @@ void setup() {
   analogReadResolution(12);        // Internal ADC resolution 12-bit
   analogSetAttenuation(ADC_11db);  // 2.5V range
 
-  // I2C Initialisation
+  // Power MS5837
+  pinMode(Sensor_GND_Pin, OUTPUT);
+  pinMode(Sensor_VCC_Pin, OUTPUT);
+  digitalWrite(Sensor_GND_Pin, LOW);
+  digitalWrite(Sensor_VCC_Pin, HIGH);
+  delay(10);
+
+  // MS5837 dedicated I2C initialisation
+  sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
+  sensorWire.setClock(400000);
+
+  // I2C initialisation
   Wire.begin(SDA_Pin, SCL_Pin);
-  Wire.setClock(400000);  // I2C clock speed 400kHz
+  Wire.setClock(400000);
 
-  // MS5837 Initialisation
-  sensor.init();
-  sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
-  sensor.setFluidDensity(Density);       // Set water density
+  // MS5837 initialisation
+  // sensor.init(sensorWire);
+  // sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
+  // sensor.setFluidDensity(Density);       // Set water density
 
-  // BH1750 Initialisation
+// --- TESTING --- //
+  Pressure_Sensor_Available = isMs5837Present();
+  if (Pressure_Sensor_Available) {
+    Pressure_Sensor_Available = sensor.init(sensorWire);
+    if (Pressure_Sensor_Available) {
+      sensor.setModel(MS5837::MS5837_30BA);
+      sensor.setFluidDensity(Density);
+    }
+  }
+// --- TESTING --- //
+
+  // BH1750 initialisation
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE);  // 4 lux, 16 ms
 
-  // QMI8658 and QMC5883L Initialisation
+  // QMI8658 and QMC5883L initialisation
   initCompassSensors(SDA_Pin, SCL_Pin);
 
-  // ZHL-16C Initialisation
+  // ZHL-16C initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
   decoInit();
   Deco_Last_Update_US = static_cast<uint64_t>(esp_timer_get_time());
 
-  // Display Initialisation
+  // Display initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
   pinMode(Calibration_Button_Pin, INPUT_PULLUP);
   pinMode(Backlight_Pin, OUTPUT);
@@ -954,14 +1002,14 @@ void loop() {
     Deco_Last_Update_US = loopStartUs - Deco_Update_Period_US;
   }
 
-  // Compass Calibration
+  // Compass calibration
   if (calibrationButtonPressed(loopStartUs) && !Calibration_Armed) {
     Calibration_Armed = true;
     Calibration_Start_US = loopStartUs;
   }
   if (Calibration_Armed) {
     const uint64_t elapsedUs = loopStartUs - Calibration_Start_US;
-    // Start Calibration
+    // Start calibration
     if (elapsedUs < Calibration_Delay_US) {
       display.fillScreen(ST77XX_BLACK);
       drawCentreText("Compass", 70, 4, ST77XX_WHITE);
@@ -996,9 +1044,16 @@ void loop() {
   }
 
   // Depth
-  sensor.read();
-  const float pressureAtm = sensor.pressure() / MBAR_PER_ATM;
-  Depth = sensor.depth() - Depth_Offset;  // Sea level offset
+  // sensor.read();
+  // const float pressureAtm = sensor.pressure() / MBAR_PER_ATM;
+  // Depth = sensor.depth() - Depth_Offset;  // Sea level offset
+
+// --- TESTING --- //
+  float pressureMbar = MBAR_PER_ATM;
+  readDepthAndPressure(Depth, pressureMbar);
+  const float pressureAtm = pressureMbar / MBAR_PER_ATM;
+// --- TESTING --- //
+
   if (Depth < 0.0f) Depth = 0.0f;         // Minimum depth 0 meter
   if (Depth > 99.9f) Depth = 99.9f;       // Maximum depth 99.9 meters
 
