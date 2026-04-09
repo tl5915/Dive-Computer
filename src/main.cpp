@@ -843,8 +843,8 @@ void setup() {
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Bottom", 70, 4, ST77XX_WHITE);
-  drawCentreText("Timer", 126, 4, ST77XX_WHITE);
+  drawCentreText("Dive", 60, 6, ST77XX_WHITE);
+  drawCentreText("Computer", 152, 6, ST77XX_WHITE);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
