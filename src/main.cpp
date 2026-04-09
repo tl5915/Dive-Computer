@@ -4,6 +4,8 @@
 #include <esp_wifi.h>
 #include <esp_timer.h>
 #include <esp_sleep.h>
+#include <esp_heap_caps.h>
+#include <esp_pm.h>
 // Peripherals
 #include <SPI.h>
 #include <Wire.h>
@@ -115,8 +117,16 @@ constexpr float Setpoint = 1.2f;
 
 // Loop usage
 uint16_t Loop_Usage_Percent = 0;
+// RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
+GFXcanvas16 *Frame_Canvas = nullptr;
+uint16_t *Frame_Back_Previous = nullptr;
+uint16_t *Frame_Back_Current = nullptr;
+size_t Frame_Buffer_Bytes = 0;
+uint16_t Render_Width = 0;
+uint16_t Render_Height = 0;
+bool Frame_Have_Previous = false;
 // Modes
 bool ripNtear_Mode = false;
 // Dive metrics
@@ -475,16 +485,16 @@ void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colo
 }
 
 // Display Column-Centred Text
-void drawColCentreText(const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t textSize, uint16_t colour) {
+void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t textSize, uint16_t colour) {
   int16_t x1 = 0, y1 = 0;
   uint16_t w = 0, h = 0;
-  display.setTextSize(textSize);
-  display.setTextWrap(false);
-  display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+  target.setTextSize(textSize);
+  target.setTextWrap(false);
+  target.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
   const int16_t x = colX + ((colW - static_cast<int16_t>(w)) / 2) - x1;
-  display.setCursor(x, y);
-  display.setTextColor(colour, ST77XX_BLACK);
-  display.print(text);
+  target.setCursor(x, y);
+  target.setTextColor(colour, ST77XX_BLACK);
+  target.print(text);
 }
 
 // Timer
@@ -549,7 +559,7 @@ uint8_t batteryPercentage(float Battery_Voltage) {
 }
 
 // Battery Indicator
-void drawBatteryIndicator(uint8_t percentage) {
+void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
   uint16_t fillColor = ST77XX_GREEN;
   if (percentage < 10) {
     fillColor = ST77XX_RED;
@@ -563,14 +573,14 @@ void drawBatteryIndicator(uint8_t percentage) {
   const int16_t outlineX = 216;
   const int16_t outlineY = 16;
   const int16_t fillWidth = map(percentage, 0, 100, 0, outlineW - (padding * 2));
-  display.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
-  display.drawRect(outlineX, outlineY, outlineW, outlineH, ST77XX_WHITE);
-  display.fillRect(outlineX + outlineW, outlineY + 5, tipW, outlineH - 10, ST77XX_WHITE);
-  display.fillRect(outlineX + padding, outlineY + padding, fillWidth, outlineH - (padding * 2), fillColor);
+  target.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
+  target.drawRect(outlineX, outlineY, outlineW, outlineH, ST77XX_WHITE);
+  target.fillRect(outlineX + outlineW, outlineY + 5, tipW, outlineH - 10, ST77XX_WHITE);
+  target.fillRect(outlineX + padding, outlineY + padding, fillWidth, outlineH - (padding * 2), fillColor);
 }
 
 // Heading Display
-void drawHeadingValue(int16_t y, float direction) {
+void drawHeadingValue(Adafruit_GFX &target, int16_t y, float direction) {
   int heading = static_cast<int>(direction + 0.5f);
   if (heading == 360) {
     heading = 0;
@@ -581,15 +591,15 @@ void drawHeadingValue(int16_t y, float direction) {
   int16_t y1 = 0;
   uint16_t textW = 0;
   uint16_t textH = 0;
-  display.setTextSize(3);
-  display.getTextBounds(headingString, 0, 0, &x1, &y1, &textW, &textH);
-  display.setCursor(280 - static_cast<int16_t>(textW), y);
-  display.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
-  display.print(headingString);
+  target.setTextSize(3);
+  target.getTextBounds(headingString, 0, 0, &x1, &y1, &textW, &textH);
+  target.setCursor(280 - static_cast<int16_t>(textW), y);
+  target.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
+  target.print(headingString);
 }
 
 // Compass Display
-void drawCompassBanner(float direction) {
+void drawCompassBanner(Adafruit_GFX &target, float direction) {
   const int16_t centerX = 140;
   const int16_t compassY = 200;
   const float pixelsPerDegree = 280.0f / 180.0f;
@@ -611,7 +621,7 @@ void drawCompassBanner(float direction) {
     if (tickX < 0 || tickX >= 280) {
       continue;
     }
-    display.drawLine(tickX, compassY + 1, tickX, minorTickBottomY, ST77XX_WHITE);
+    target.drawLine(tickX, compassY + 1, tickX, minorTickBottomY, ST77XX_WHITE);
   }
   for (const CompassLabel &marker : Compass_Labels) {
     float delta = static_cast<float>(marker.degrees) - direction;
@@ -632,13 +642,97 @@ void drawCompassBanner(float direction) {
     int16_t y1 = 0;
     uint16_t labelW = 0;
     uint16_t labelH = 0;
-    display.setTextSize(2);
-    display.getTextBounds(marker.label, 0, 0, &x1, &y1, &labelW, &labelH);
-    display.drawLine(tickX, compassY + 1, tickX, majorTickBottomY, ST77XX_WHITE);
-    display.setTextColor(ST77XX_WHITE);
-    display.setCursor(tickX - static_cast<int16_t>(labelW / 2), labelY);
-    display.print(marker.label);
+    target.setTextSize(2);
+    target.getTextBounds(marker.label, 0, 0, &x1, &y1, &labelW, &labelH);
+    target.drawLine(tickX, compassY + 1, tickX, majorTickBottomY, ST77XX_WHITE);
+    target.setTextColor(ST77XX_WHITE);
+    target.setCursor(tickX - static_cast<int16_t>(labelW / 2), labelY);
+    target.print(marker.label);
   }
+}
+
+static bool initFrameBuffers() {
+  Render_Width = static_cast<uint16_t>(display.width());
+  Render_Height = static_cast<uint16_t>(display.height());
+  Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
+
+  Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
+  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
+    return false;
+  }
+
+  Frame_Back_Previous = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  Frame_Back_Current = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) {
+    return false;
+  }
+
+  memset(Frame_Back_Previous, 0, Frame_Buffer_Bytes);
+  memset(Frame_Back_Current, 0, Frame_Buffer_Bytes);
+  Frame_Have_Previous = false;
+  return true;
+}
+
+static void flushDirtyRectFromPSRAM() {
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
+    return;
+  }
+
+  uint16_t dirtyX0 = Render_Width;
+  uint16_t dirtyY0 = Render_Height;
+  uint16_t dirtyX1 = 0;
+  uint16_t dirtyY1 = 0;
+  bool hasDirty = !Frame_Have_Previous;
+
+  if (!hasDirty) {
+    for (uint16_t y = 0; y < Render_Height; ++y) {
+      const uint16_t rowOffset = static_cast<uint16_t>(y * Render_Width);
+      int16_t left = -1;
+      int16_t right = -1;
+      for (uint16_t x = 0; x < Render_Width; ++x) {
+        const uint16_t idx = static_cast<uint16_t>(rowOffset + x);
+        if (Frame_Back_Current[idx] != Frame_Back_Previous[idx]) {
+          if (left < 0) {
+            left = static_cast<int16_t>(x);
+          }
+          right = static_cast<int16_t>(x);
+        }
+      }
+      if (left >= 0) {
+        hasDirty = true;
+        if (y < dirtyY0) dirtyY0 = y;
+        if (y > dirtyY1) dirtyY1 = y;
+        if (static_cast<uint16_t>(left) < dirtyX0) dirtyX0 = static_cast<uint16_t>(left);
+        if (static_cast<uint16_t>(right) > dirtyX1) dirtyX1 = static_cast<uint16_t>(right);
+      }
+    }
+  }
+
+  if (hasDirty) {
+    if (!Frame_Have_Previous) {
+      dirtyX0 = 0;
+      dirtyY0 = 0;
+      dirtyX1 = static_cast<uint16_t>(Render_Width - 1);
+      dirtyY1 = static_cast<uint16_t>(Render_Height - 1);
+    }
+
+    const uint16_t dirtyW = static_cast<uint16_t>(dirtyX1 - dirtyX0 + 1);
+    const uint16_t dirtyH = static_cast<uint16_t>(dirtyY1 - dirtyY0 + 1);
+
+    display.startWrite();
+    display.setAddrWindow(dirtyX0, dirtyY0, dirtyW, dirtyH);
+    for (uint16_t row = 0; row < dirtyH; ++row) {
+      const uint16_t srcY = static_cast<uint16_t>(dirtyY0 + row);
+      uint16_t *rowPtr = &Frame_Back_Current[(static_cast<size_t>(srcY) * Render_Width) + dirtyX0];
+      display.writePixels(rowPtr, dirtyW, true, false);
+    }
+    display.endWrite();
+  }
+
+  uint16_t *tmp = Frame_Back_Previous;
+  Frame_Back_Previous = Frame_Back_Current;
+  Frame_Back_Current = tmp;
+  Frame_Have_Previous = true;
 }
 
 // Calibration Score Display
@@ -694,7 +788,7 @@ static void drawCalibrationScore() {
 }
 
 // Bottom Timer Display Update
-void updateDisplay(float Depth, int Minutes, int Seconds, const DecoResult &deco) {
+void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, const DecoResult &deco) {
   // Draw depth block on top-left
   uint8_t depthInteger = static_cast<uint8_t>(Depth);
   uint8_t depthDecimal = static_cast<uint8_t>(Depth * 10.0f + 0.5f) % 10;
@@ -717,14 +811,14 @@ void updateDisplay(float Depth, int Minutes, int Seconds, const DecoResult &deco
   uint16_t unitH = 0;
   uint16_t dotW = 0;
   uint16_t dotH = 0;
-  display.setTextSize(integerSize);
-  display.getTextBounds(integerPart, 0, 0, &x1, &y1, &integerW, &integerH);
-  display.setTextSize(decimalSize);
-  display.getTextBounds(decimalPart, 0, 0, &x1, &y1, &decimalW, &decimalH);
-  display.setTextSize(decimalSize);
-  display.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
-  display.setTextSize(dotSize);
-  display.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
+  target.setTextSize(integerSize);
+  target.getTextBounds(integerPart, 0, 0, &x1, &y1, &integerW, &integerH);
+  target.setTextSize(decimalSize);
+  target.getTextBounds(decimalPart, 0, 0, &x1, &y1, &decimalW, &decimalH);
+  target.setTextSize(decimalSize);
+  target.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
+  target.setTextSize(dotSize);
+  target.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
   const int16_t depthX = 26;
   const int16_t depthY = 12;
   const int16_t depthBottom = depthY + static_cast<int16_t>(integerH);
@@ -734,33 +828,33 @@ void updateDisplay(float Depth, int Minutes, int Seconds, const DecoResult &deco
   const int16_t decimalY = depthBottom - static_cast<int16_t>(decimalH);
   const int16_t unitX = decimalX + static_cast<int16_t>(decimalW) + 2;
   const int16_t unitY = depthBottom - static_cast<int16_t>(unitH);
-  display.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-  display.setTextSize(integerSize);
-  display.setCursor(depthX, depthY);
-  display.print(integerPart);
-  display.setTextSize(dotSize);
-  display.setCursor(dotX, dotY);
-  display.print(dotPart);
-  display.setTextSize(decimalSize);
-  display.setCursor(decimalX, decimalY);
-  display.print(decimalPart);
-  display.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
-  display.setTextSize(decimalSize);
-  display.setCursor(unitX, unitY);
-  display.print(unitPart);
+  target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  target.setTextSize(integerSize);
+  target.setCursor(depthX, depthY);
+  target.print(integerPart);
+  target.setTextSize(dotSize);
+  target.setCursor(dotX, dotY);
+  target.print(dotPart);
+  target.setTextSize(decimalSize);
+  target.setCursor(decimalX, decimalY);
+  target.print(decimalPart);
+  target.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+  target.setTextSize(decimalSize);
+  target.setCursor(unitX, unitY);
+  target.print(unitPart);
   // Draw battery indicator on top right
-  drawBatteryIndicator(Battery_Percentage);
+  drawBatteryIndicator(target, Battery_Percentage);
   // Draw loop usage left of battery
   char loopUsageStr[9];
   snprintf(loopUsageStr, sizeof(loopUsageStr), "CPU:%3u%%", Loop_Usage_Percent);
-  display.setTextSize(1);
-  display.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+  target.setTextSize(1);
+  target.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
   {
     int16_t ux1 = 0, uy1 = 0;
     uint16_t uW = 0, uH = 0;
-    display.getTextBounds(loopUsageStr, 0, 0, &ux1, &uy1, &uW, &uH);
-    display.setCursor(210 - static_cast<int16_t>(uW), 18);
-    display.print(loopUsageStr);
+    target.getTextBounds(loopUsageStr, 0, 0, &ux1, &uy1, &uW, &uH);
+    target.setCursor(210 - static_cast<int16_t>(uW), 18);
+    target.print(loopUsageStr);
   }
   // Current GF below battery
   char gfStr[6];
@@ -769,47 +863,47 @@ void updateDisplay(float Depth, int Minutes, int Seconds, const DecoResult &deco
   } else {
     snprintf(gfStr, sizeof(gfStr), "60/85");
   }
-  display.setTextSize(1);
-  display.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
-  display.setCursor(221, 32);
-  display.print(gfStr);
+  target.setTextSize(1);
+  target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
+  target.setCursor(221, 32);
+  target.print(gfStr);
   // Draw timer below depth
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
-  display.setTextSize(3);
-  display.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
-  display.setCursor(0, 120);
-  display.print(timerString);
+  target.setTextSize(3);
+  target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
+  target.setCursor(0, 120);
+  target.print(timerString);
   // Draw heading right of timer
-  drawHeadingValue(120, Heading);
+  drawHeadingValue(target, 120, Heading);
   // Draw Deco table below timer and heading
-  display.drawFastHLine(0, 155, 280, ST77XX_WHITE);
-  display.drawFastVLine(70, 156, 44, ST77XX_WHITE);
-  display.drawFastVLine(140, 156, 44, ST77XX_WHITE);
-  display.drawFastVLine(210, 156, 44, ST77XX_WHITE);
+  target.drawFastHLine(0, 155, 280, ST77XX_WHITE);
+  target.drawFastVLine(70, 156, 44, ST77XX_WHITE);
+  target.drawFastVLine(140, 156, 44, ST77XX_WHITE);
+  target.drawFastVLine(210, 156, 44, ST77XX_WHITE);
   constexpr int16_t leftColX = 1;
   constexpr int16_t rightColX = 141;
   constexpr int16_t cellW = 68;
   constexpr int16_t topTitleY = 128;
-  display.setTextSize(2);
-  display.setTextColor(ST77XX_CYAN);
-  display.setCursor(0, 170);
-  display.print("D");
-  display.setCursor(74, 170);
-  display.print("S");
-  display.setTextSize(1);
-  display.setCursor(144, 168);
-  display.print("T");
-  display.setCursor(144, 178);
-  display.print("T");
-  display.setCursor(144, 188);
-  display.print("S");
-  display.setCursor(214, 168);
-  display.print("s");
-  display.setCursor(214, 178);
-  display.print("G");
-  display.setCursor(214, 188);
-  display.print("F");
+  target.setTextSize(2);
+  target.setTextColor(ST77XX_CYAN);
+  target.setCursor(0, 170);
+  target.print("D");
+  target.setCursor(74, 170);
+  target.print("S");
+  target.setTextSize(1);
+  target.setCursor(144, 168);
+  target.print("T");
+  target.setCursor(144, 178);
+  target.print("T");
+  target.setCursor(144, 188);
+  target.print("S");
+  target.setCursor(214, 168);
+  target.print("s");
+  target.setCursor(214, 178);
+  target.print("G");
+  target.setCursor(214, 188);
+  target.print("F");
   uint16_t surfGfColor = ST77XX_GREEN;
   if (deco.surfGF > 100) {
     surfGfColor = ST77XX_RED;
@@ -821,24 +915,29 @@ void updateDisplay(float Depth, int Minutes, int Seconds, const DecoResult &deco
   snprintf(timeStr, sizeof(timeStr), "%3u", deco.stopTime);
   snprintf(ttsStr, sizeof(ttsStr), "%3u", deco.timeToSurface);
   snprintf(sGfStr, sizeof(sGfStr), "%3u", deco.surfGF);
-  drawColCentreText(stopStr, 20, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(timeStr, 94, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(ttsStr, 158, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(sGfStr, 228, 36, 170, 2, surfGfColor);
+  drawColCentreText(target, stopStr, 20, 36, 170, 2, ST77XX_WHITE);
+  drawColCentreText(target, timeStr, 94, 36, 170, 2, ST77XX_WHITE);
+  drawColCentreText(target, ttsStr, 158, 36, 170, 2, ST77XX_WHITE);
+  drawColCentreText(target, sGfStr, 228, 36, 170, 2, surfGfColor);
   // Draw compass banner at bottom
-  display.fillRect(0, 201, 280, 39, ST77XX_BLACK);
-  display.drawFastHLine(0, 200, 280, ST77XX_WHITE);
-  drawCompassBanner(Heading);
-  display.fillTriangle(136, 202, 144, 202, 140, 210, ST77XX_CYAN);
-  display.drawLine(140, 210, 140, 240, ST77XX_CYAN);
+  target.fillRect(0, 201, 280, 39, ST77XX_BLACK);
+  target.drawFastHLine(0, 200, 280, ST77XX_WHITE);
+  drawCompassBanner(target, Heading);
+  target.fillTriangle(136, 202, 144, 202, 140, 210, ST77XX_CYAN);
+  target.drawLine(140, 210, 140, 240, ST77XX_CYAN);
 }
 
 
 void setup() {
   // Power conservation
-  esp_wifi_stop();              // WiFi off
-  esp_bt_controller_disable();  // Bluetooth off
-  setCpuFrequencyMhz(80);       // Reduce CPU frequency
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+  esp_pm_config_esp32s3_t pm_config = {
+    .max_freq_mhz = 160,
+    .min_freq_mhz = 40,
+    .light_sleep_enable = true
+  };
+  esp_pm_configure(&pm_config);
 
   // Display initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
@@ -923,18 +1022,38 @@ void setup() {
   decoInit();
   Deco_Last_Update_MS = millis();
 
+  // PSRAM frame buffer initialisation
+  if (!initFrameBuffers()) {
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Frame Buffer", 96, 3, ST77XX_RED);
+    drawCentreText("Alloc Failed", 144, 3, ST77XX_RED);
+    delay(Message_MS);
+  }
+
   // Display update on one core
   xTaskCreatePinnedToCore(
       [](void *) {
+        TickType_t lastWakeTick = xTaskGetTickCount();
+        const TickType_t displayPeriodTicks = pdMS_TO_TICKS(Display_Update_MS);
         for (;;) {
           const uint64_t frameStartMS = millis();
-          updateDisplay(Depth, Minutes, Seconds, lastDecoResult);
+          if (Frame_Canvas != nullptr && Frame_Back_Current != nullptr) {
+            Frame_Canvas->fillScreen(ST77XX_BLACK);
+            updateDisplay(*Frame_Canvas, Depth, Minutes, Seconds, lastDecoResult);
+            memcpy(Frame_Back_Current, Frame_Canvas->getBuffer(), Frame_Buffer_Bytes);
+            flushDirtyRectFromPSRAM();
+          } else {
+            updateDisplay(display, Depth, Minutes, Seconds, lastDecoResult);
+          }
           const uint64_t frameElapsedMS = millis() - frameStartMS;
           if (Display_Update_MS > 0) {
             Loop_Usage_Percent = (frameElapsedMS * 100ULL + (Display_Update_MS / 2ULL)) / Display_Update_MS;
           }
-          const uint64_t remainingMS = (frameElapsedMS < Display_Update_MS) ? (Display_Update_MS - frameElapsedMS) : 1ULL;
-          vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(remainingMS)));
+          if (displayPeriodTicks > 0) {
+            vTaskDelayUntil(&lastWakeTick, displayPeriodTicks);
+          } else {
+            taskYIELD();
+          }
         }
       },
       "DisplayTask",
@@ -946,6 +1065,8 @@ void setup() {
 
   xTaskCreatePinnedToCore(
       [](void *) {
+        TickType_t lastWakeTick = xTaskGetTickCount();
+        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Fast_Update_MS);
         uint64_t lastFastUpdateMS = 0;
         uint64_t lastSlowUpdateMS = 0;
         for (;;) {
@@ -976,6 +1097,7 @@ void setup() {
                 drawCentreText("Compass", 70, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
                 delay(100);
+                lastWakeTick = xTaskGetTickCount();
               } else {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
@@ -1002,6 +1124,7 @@ void setup() {
                 if (Display_Task_Handle != nullptr) {
                   vTaskResume(Display_Task_Handle);
                 }
+                lastWakeTick = xTaskGetTickCount();
               }
             }
             // Compass
@@ -1045,7 +1168,11 @@ void setup() {
               lastDecoResult = decoCompute(pressureAtm);
             }
           }
-          vTaskDelay(pdMS_TO_TICKS(5));
+          if (fastPeriodTicks > 0) {
+            vTaskDelayUntil(&lastWakeTick, fastPeriodTicks);
+          } else {
+            taskYIELD();
+          }
         }
       },
       "SensorTask",
