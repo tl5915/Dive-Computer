@@ -61,10 +61,8 @@ constexpr float Ambient_Lux_Max = 800.0f;           // Lux level at high backlig
 constexpr uint8_t Backlight_Low = 8;                // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 2000;               // Display messages for 2 seconds
-constexpr uint32_t Display_Update_MS = 50;          // Display refresh rate: 20 Hz
-constexpr uint32_t Fast_Update_MS = 100;            // Heading/tap/button checks: 10 Hz
-constexpr uint32_t Slow_Update_MS = 1000;           // Depth sensor and ADC updates: 1 Hz
-constexpr uint32_t Deco_Update_MS = 10000;          // Decompression model updates: 0.1 Hz
+constexpr uint32_t Loop_MS = 100;                   // Bottom timer mode: 10 Hz refresh rate
+constexpr uint32_t Deco_Update_MS = 10000;          // Update tissue model every 10 seconds
 
 // Compass Constants
 constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
@@ -115,8 +113,6 @@ constexpr float Setpoint = 1.2f;
 
 // Loop usage
 uint16_t Loop_Usage_Percent = 0;
-TaskHandle_t Display_Task_Handle = nullptr;
-TaskHandle_t Sensor_Task_Handle = nullptr;
 // Modes
 bool ripNtear_Mode = false;
 // Dive metrics
@@ -922,140 +918,120 @@ void setup() {
   decoSetup(GF_Low, GF_High, Setpoint);
   decoInit();
   Deco_Last_Update_MS = millis();
-
-  // Display update on one core
-  xTaskCreatePinnedToCore(
-      [](void *) {
-        for (;;) {
-          const uint64_t frameStartMS = millis();
-          updateDisplay(Depth, Minutes, Seconds, lastDecoResult);
-          const uint64_t frameElapsedMS = millis() - frameStartMS;
-          if (Display_Update_MS > 0) {
-            Loop_Usage_Percent = (frameElapsedMS * 100ULL + (Display_Update_MS / 2ULL)) / Display_Update_MS;
-          }
-          const uint64_t remainingMS = (frameElapsedMS < Display_Update_MS) ? (Display_Update_MS - frameElapsedMS) : 1ULL;
-          vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(remainingMS)));
-        }
-      },
-      "DisplayTask",
-      8192,
-      nullptr,
-      2,
-      &Display_Task_Handle,
-      1);
-
-  xTaskCreatePinnedToCore(
-      [](void *) {
-        uint64_t lastFastUpdateMS = 0;
-        uint64_t lastSlowUpdateMS = 0;
-        for (;;) {
-          const uint64_t nowMS = millis();
-
-          // 10 Hz
-          if ((nowMS - lastFastUpdateMS) >= Fast_Update_MS) {
-            lastFastUpdateMS = nowMS;
-            // Tap detection
-            if (detectTripleTap(nowMS)) {
-              ripNtear_Mode = true;
-              ripNtear(true);
-              Deco_Last_Update_MS = nowMS - Deco_Update_MS;
-            }
-            // Calibration button detection
-            if (calibrationButtonPressed(nowMS) && !Calibration_Armed) {
-              Calibration_Armed = true;
-              Calibration_Start_MS = nowMS;
-            }
-            // Calibration
-            if (Calibration_Armed) {
-              const uint64_t elapsedMs = nowMS - Calibration_Start_MS;
-              if (elapsedMs < Calibration_Delay_MS) {
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Compass", 70, 4, ST77XX_WHITE);
-                drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
-                delay(100);
-              } else {
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
-                std::vector<float> mag_samples_xyz;
-                collectCompassSamples(mag_samples_xyz);
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
-                const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
-                display.fillScreen(ST77XX_BLACK);
-                if (calibration_ok) {
-                  drawCentreText("Done", 98, 4, ST77XX_GREEN);
-                } else {
-                  drawCentreText("Failed", 98, 4, ST77XX_RED);
-                }
-                drawCentreText(compassCalibrationMethodText(Last_Calibration_Method), 140, 2, ST77XX_WHITE);
-                delay(Message_MS);
-                drawCalibrationScore();
-                delay(Message_MS * 5);
-                Calibration_Armed = false;
-                Deco_Last_Update_MS = nowMS - Deco_Update_MS;
-                if (Display_Task_Handle != nullptr) {
-                  vTaskResume(Display_Task_Handle);
-                }
-              }
-            }
-            // Compass
-            Heading = readCompassHeading();
-          }
-
-          // 1 Hz
-          if ((nowMS - lastSlowUpdateMS) >= Slow_Update_MS) {
-            lastSlowUpdateMS = nowMS;
-            // Depth
-            float pressureMbar = MBAR_PER_ATM;
-            readDepthAndPressure(Depth, pressureMbar);
-            const float pressureAtm = pressureMbar / MBAR_PER_ATM;
-            //Timer
-            updateTimer(Depth, nowMS);
-            // Backlight and battery
-            Ambient_Lux = lightMeter.readLightLevel();
-            Battery_Percentage = readBatteryPercentage();
-            if (Battery_Percentage < Low_Battery_Threshold) {
-              Backlight_Level = Backlight_Low;
-            } else {
-              Backlight_Level = ambientBacklightLevel(Ambient_Lux);
-            }
-            analogWrite(Backlight_Pin, Backlight_Level);
-            if (Battery_Percentage < Critical_Battery_Threshold) {
-              if (Display_Task_Handle != nullptr) {
-                vTaskSuspend(Display_Task_Handle);
-              }
-              display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Battery", 86, 4, ST77XX_RED);
-              drawCentreText("Low", 144, 4, ST77XX_RED);
-              delay(Message_MS);
-              digitalWrite(Backlight_Pin, LOW);
-              esp_deep_sleep_start();
-            }
-            // 0.1 Hz: ZHL-16C
-            if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
-              const float dtMin = static_cast<float>(nowMS - Deco_Last_Update_MS) / 60000.0f;
-              Deco_Last_Update_MS = nowMS;
-              decoUpdate(pressureAtm, dtMin);
-              lastDecoResult = decoCompute(pressureAtm);
-            }
-          }
-          vTaskDelay(pdMS_TO_TICKS(5));
-        }
-      },
-      "SensorTask",
-      12288,
-      nullptr,
-      2,
-      &Sensor_Task_Handle,
-      0);
 }
 
+
 void loop() {
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  const uint64_t loopStartMS = millis();
+
+  // Rip & Tear Mode (raw Bühlmann ZHL-16C algorithm)
+  if (detectTripleTap(loopStartMS)) {
+    ripNtear_Mode = true;
+    ripNtear(true);
+    Deco_Last_Update_MS = loopStartMS - Deco_Update_MS;
+  }
+
+  // Compass calibration
+  if (calibrationButtonPressed(loopStartMS) && !Calibration_Armed) {
+    Calibration_Armed = true;
+    Calibration_Start_MS = loopStartMS;
+  }
+  if (Calibration_Armed) {
+    const uint64_t elapsedMs = loopStartMS - Calibration_Start_MS;
+    // Start calibration
+    if (elapsedMs < Calibration_Delay_MS) {
+      display.fillScreen(ST77XX_BLACK);
+      drawCentreText("Compass", 70, 4, ST77XX_WHITE);
+      drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
+      delay(100);
+      return;
+    }
+    // Data collection
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
+    std::vector<float> mag_samples_xyz;
+    collectCompassSamples(mag_samples_xyz);
+    // Computing calibration
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
+    const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
+    // Calibration complete
+    display.fillScreen(ST77XX_BLACK);
+    if (calibration_ok) {
+      drawCentreText("Done", 98, 4, ST77XX_GREEN);
+    } else {
+      drawCentreText("Failed", 98, 4, ST77XX_RED);
+    }
+    drawCentreText(compassCalibrationMethodText(Last_Calibration_Method), 140, 2, ST77XX_WHITE);
+    delay(Message_MS);
+    drawCalibrationScore();
+    delay(Message_MS * 5);
+    Calibration_Armed = false;
+    Deco_Last_Update_MS = loopStartMS - Loop_MS;
+    return;
+  }
+
+  // Depth
+  // sensor.read();
+  // const float pressureAtm = sensor.pressure() / MBAR_PER_ATM;
+  // Depth = sensor.depth() - Depth_Offset;  // Sea level offset
+  // if (Depth < 0.0f) Depth = 0.0f;         // Minimum depth 0 meter
+  // if (Depth > 99.9f) Depth = 99.9f;       // Maximum depth 99.9 meters
+
+
+// --- TESTING --- //
+  float pressureMbar = MBAR_PER_ATM;
+  readDepthAndPressure(Depth, pressureMbar);
+  const float pressureAtm = pressureMbar / MBAR_PER_ATM;
+// --- TESTING --- //
+
+
+  // Timer
+  updateTimer(Depth, loopStartMS);
+
+  // Compass
+  Heading = readCompassHeading();
+
+  // Backlight
+  Ambient_Lux = lightMeter.readLightLevel();
+
+  // Battery
+  Battery_Percentage = readBatteryPercentage();
+  if (Battery_Percentage < Low_Battery_Threshold) {
+    Backlight_Level = Backlight_Low;
+    analogWrite(Backlight_Pin, Backlight_Level);
+  } else {
+    Backlight_Level = ambientBacklightLevel(Ambient_Lux);
+    analogWrite(Backlight_Pin, Backlight_Level);
+  }
+  if (Battery_Percentage < Critical_Battery_Threshold) {
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Battery", 86, 4, ST77XX_RED);
+    drawCentreText("Low", 144, 4, ST77XX_RED);
+    delay(Message_MS);
+    digitalWrite(Backlight_Pin, LOW);
+    esp_deep_sleep_start();
+  }
+
+  // ZHL-16C
+  if ((loopStartMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
+    const float dtMin = static_cast<float>(loopStartMS - Deco_Last_Update_MS) / 60000.0f;
+    Deco_Last_Update_MS = loopStartMS;
+    decoUpdate(pressureAtm, dtMin);
+    lastDecoResult = decoCompute(pressureAtm);
+  }
+
+  // Display Update
+  updateDisplay(Depth, Minutes, Seconds, lastDecoResult);
+
+  // Loop Usage
+  uint64_t elapsedMS = millis() - loopStartMS;
+  if (Loop_MS > 0) {
+    Loop_Usage_Percent = (elapsedMS * 100ULL + (Loop_MS / 2ULL)) / Loop_MS;
+  }
+
+  // Loop Interval
+  if (elapsedMS < Loop_MS) {
+    delay(Loop_MS - elapsedMS);
+  }
 }
