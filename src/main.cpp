@@ -37,6 +37,7 @@ constexpr uint8_t Sensor_SCL_Pin = 17;
 constexpr uint8_t Sensor_SDA_Pin = 18;
 constexpr uint8_t Sys_Pin = 40;
 constexpr uint8_t Power_Pin = 41;
+constexpr uint8_t Buzz_Pin = 42;
 
 
 // Define Objects
@@ -960,6 +961,8 @@ void setup() {
   delay(10);
   pinMode(Sys_Pin, INPUT);
   // Power conservation
+  pinMode(Buzz_Pin, OUTPUT);
+  digitalWrite(Buzz_Pin, LOW);
   esp_wifi_stop();
   esp_bt_controller_disable();
   esp_pm_config_esp32s3_t pm_config = {
