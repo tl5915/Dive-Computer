@@ -495,9 +495,9 @@ static void readQmcAxesTransformed(float out_mag[3]) {
   const float qmc_x = static_cast<float>(mag_data.raw.x);
   const float qmc_y = static_cast<float>(mag_data.raw.y);
   const float qmc_z = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -qmc_y;  // X_qmi = -Y_qmc
-  out_mag[1] = qmc_x;   // Y_qmi = X_qmc
-  out_mag[2] = qmc_z;   // Z_qmi = Z_qmc
+  out_mag[0] = -qmc_y;  // Right = library X = -QMC_Y
+  out_mag[1] = qmc_x;   // Down = library Y = QMC_X
+  out_mag[2] = qmc_z;   // Forward = library Z = QMC_Z
 }
 
 // Read Compass Heading
@@ -510,7 +510,7 @@ static float readCompassHeading() {
   // Magnetometer reading
   float raw_mag[3] = {0.0f, 0.0f, 0.0f};
   readQmcAxesTransformed(raw_mag);
-  const float accel[3] = {ax, ay, az};
+  const float accel[3] = {ax, ay, -az};
   // Apply calibration and tilt compensation
   float compensated[3] = {0.0f, 0.0f, 0.0f};
   compassApplyCalibrationAndTiltCompensation(raw_mag, accel, compensated);
