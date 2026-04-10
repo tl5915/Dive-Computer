@@ -23,7 +23,6 @@
 
 // Pins
 constexpr uint8_t Battery_Pin = 1;
-constexpr uint8_t DRDY_Pin = 2;
 constexpr uint8_t DC_Pin = 4;
 constexpr uint8_t CS_Pin = 5;
 constexpr uint8_t SCK_Pin = 6;
@@ -59,8 +58,8 @@ constexpr uint16_t LCD_Height = 280;
 constexpr uint8_t Low_Battery_Threshold = 20;       // Dim screen below 20% battery
 constexpr uint8_t Critical_Battery_Threshold = 0;   // Deep sleep below 0% battery
 constexpr float Battery_Divider_Ratio = 3.0f;       // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 800.0f;           // Lux level at high backlight
-constexpr uint8_t Backlight_Low = 8;                // Low backlight in dark surroundings
+constexpr float Ambient_Lux_Max = 10000.0f;         // Lux level at high backlight
+constexpr uint8_t Backlight_Low = 1;                // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 2000;               // Display messages for 2 seconds
 constexpr uint32_t Display_Update_MS = 50;          // Display refresh rate: 20 Hz
@@ -71,7 +70,7 @@ constexpr uint32_t Deco_Update_MS = 10000;          // Decompression model updat
 // Compass Constants
 constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
 constexpr float Magnetometer_Lsb_Per_Gauss = 15000.0f;        // QMC5883P at FS_2G: 15000 LSB/Gauss
-constexpr uint32_t Compass_Calibration_Duration_MS = 120000;  // 120 seconds for compass calibration
+constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Hard_Iron_X_Key = "hi_x";
@@ -83,13 +82,13 @@ constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
 constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
 // Tap Detection Constants
-constexpr float Tap_Threshold_G = 0.3f;                 // Envelope trigger threshold
+constexpr float Tap_Threshold_G = 0.4f;                 // Envelope trigger threshold
 constexpr float Tap_Release_Threshold_G = 0.2f;         // Hysteresis release threshold
-constexpr float Tap_Gravity_LPF_Alpha = 0.94f;          // Gravity adaptation
-constexpr float Tap_Envelope_Decay_G_Per_MS = 0.0012f;  // Envelope fall speed
+constexpr float Tap_Gravity_LPF_Alpha = 0.98f;          // Gravity adaptation
+constexpr float Tap_Envelope_Decay_G_Per_MS = 0.0018f;  // Envelope fall speed
 constexpr uint8_t Tap_Burst_Samples = 6;                // Burst-read to catch short impulses
 constexpr uint16_t Tap_Burst_Spacing_MS = 2;            // 2 ms between burst samples
-constexpr uint32_t Tap_Window_MS = 3000;                // 3 taps window
+constexpr uint32_t Tap_Window_MS = 5000;                // Taps window
 constexpr uint32_t Tap_Min_Spacing_MS = 200;            // Minimum gap between taps
 
 // Button Constants
@@ -102,21 +101,11 @@ constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
 constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
 constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
-
-// --- TESTING --- //
-constexpr uint8_t MS5837_I2C_Address = 0x76;
-constexpr float Fake_Depth_Meters = 98.0f;
-bool Pressure_Sensor_Available = false;
-// --- TESTING --- //
-
-
 // ZHL-16C Constants
 constexpr u_int8_t GF_Low = 60;
 constexpr u_int8_t GF_High = 85;
 constexpr float Setpoint = 1.2f;
 
-// Loop usage
-uint16_t Loop_Usage_Percent = 0;
 // RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
@@ -130,29 +119,30 @@ bool Frame_Have_Previous = false;
 // Modes
 bool ripNtear_Mode = false;
 // Dive metrics
+bool Dive_Timer_Started = false;
+bool sensorAvailable = false;
 float Depth = 0.0f;
 float Heading = 0.0f;
 int Minutes = 0;
 int Seconds = 0;
-bool Dive_Timer_Started = false;
 uint64_t Timer_Start_MS = 0;
 // Battery
+float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
-float Ambient_Lux = 0.0f;
 uint8_t Backlight_Level = Backlight_High;
 // Calibration button
 bool Calibration_Armed = false;
-uint64_t Calibration_Start_MS = 0;
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
+uint64_t Calibration_Start_MS = 0;
 uint64_t Button_Last_Change_MS = 0;
 // Tap detection
-uint8_t tripleTapCount = 0;
-uint64_t tripleTapFirstMS = 0;
-uint64_t tripleTapLastMS = 0;
-bool tripleTapAboveThresh = false;
+uint8_t pentaTapCount = 0;
+uint64_t pentaTapFirstMS = 0;
+uint64_t pentaTapLastMS = 0;
 float Tap_Instant_Signal_G = 0.0f;
+bool pentaTapAboveThresh = false;
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_MS = 0;
@@ -180,16 +170,46 @@ static const char* compassCalibrationMethodText(CompassCalibrationMethod method)
   }
 }
 CompassCalibrationQuality Last_Calibration_Quality = {};
+enum class CalibrationFailReason : uint8_t {
+  None = 0,
+  TooFewSamples,
+  FitFailed,
+  ApplyFailed,
+  InvalidQuality,
+};
+CalibrationFailReason Last_Calibration_Fail_Reason = CalibrationFailReason::None;
+size_t Last_Calibration_Sample_Count = 0;
+uint32_t Last_Calibration_Elapsed_MS = 0;
+static const char* calibrationFailReasonText(CalibrationFailReason reason) {
+  switch (reason) {
+    case CalibrationFailReason::TooFewSamples:
+      return "Too few samples";
+    case CalibrationFailReason::FitFailed:
+      return "Fit failed";
+    case CalibrationFailReason::ApplyFailed:
+      return "Apply failed";
+    case CalibrationFailReason::InvalidQuality:
+      return "Invalid quality";
+    case CalibrationFailReason::None:
+    default:
+      return "None";
+  }
+}
 // Compass labels
 struct CompassLabel {
   int degrees;
   const char *label;
+  uint8_t textSize;
 };
 const CompassLabel Compass_Labels[] = {
-    {0, "N"},
-    {90, "E"},
-    {180, "S"},
-    {270, "W"}
+    {0,   "N",  3},
+    {45,  "NE", 2},
+    {90,  "E",  3},
+    {135, "SE", 2},
+    {180, "S",  3},
+    {225, "SW", 2},
+    {270, "W",  3},
+    {315, "NW", 2},
   };
 // Battery Percentage Lookup Table
 constexpr float Voltage_Table[] = {
@@ -201,27 +221,83 @@ constexpr uint8_t Percentage_Table[] = {
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
 
-// --- TESTING --- //
-static bool isMs5837Present() {
-  sensorWire.beginTransmission(MS5837_I2C_Address);
-  return sensorWire.endTransmission() == 0;
-}
-static float depthToPressureMbar(float depth_m) {
-  const float hydrostatic_pa = static_cast<float>(Density) * 9.80665f * depth_m;
-  return MBAR_PER_ATM + (hydrostatic_pa / 100.0f);
-}
-static void readDepthAndPressure(float& depth_m, float& pressure_mbar) {
-  if (Pressure_Sensor_Available) {
-    sensor.read();
-    pressure_mbar = sensor.pressure();
-    depth_m = sensor.depth() - Depth_Offset;
-  } else {
-    depth_m = Fake_Depth_Meters;
-    pressure_mbar = depthToPressureMbar(Fake_Depth_Meters + Depth_Offset);
-  }
-}
-// --- TESTING --- //
+// Frame Buffer Management
+static bool initFrameBuffers() {
+  Render_Width = static_cast<uint16_t>(display.width());
+  Render_Height = static_cast<uint16_t>(display.height());
+  Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
 
+  Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
+  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
+    return false;
+  }
+  Frame_Back_Previous = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  Frame_Back_Current = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) {
+    return false;
+  }
+  memset(Frame_Back_Previous, 0, Frame_Buffer_Bytes);
+  memset(Frame_Back_Current, 0, Frame_Buffer_Bytes);
+  Frame_Have_Previous = false;
+  return true;
+}
+
+// Flush from PSRAM
+static void flushDirtyRectFromPSRAM() {
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
+    return;
+  }
+  uint16_t dirtyX0 = Render_Width;
+  uint16_t dirtyY0 = Render_Height;
+  uint16_t dirtyX1 = 0;
+  uint16_t dirtyY1 = 0;
+  bool hasDirty = !Frame_Have_Previous;
+  if (!hasDirty) {
+    for (uint16_t y = 0; y < Render_Height; ++y) {
+      const size_t rowOffset = static_cast<size_t>(y) * static_cast<size_t>(Render_Width);
+      int16_t left = -1;
+      int16_t right = -1;
+      for (uint16_t x = 0; x < Render_Width; ++x) {
+        const size_t idx = rowOffset + static_cast<size_t>(x);
+        if (Frame_Back_Current[idx] != Frame_Back_Previous[idx]) {
+          if (left < 0) {
+            left = static_cast<int16_t>(x);
+          }
+          right = static_cast<int16_t>(x);
+        }
+      }
+      if (left >= 0) {
+        hasDirty = true;
+        if (y < dirtyY0) dirtyY0 = y;
+        if (y > dirtyY1) dirtyY1 = y;
+        if (static_cast<uint16_t>(left) < dirtyX0) dirtyX0 = static_cast<uint16_t>(left);
+        if (static_cast<uint16_t>(right) > dirtyX1) dirtyX1 = static_cast<uint16_t>(right);
+      }
+    }
+  }
+  if (hasDirty) {
+    if (!Frame_Have_Previous) {
+      dirtyX0 = 0;
+      dirtyY0 = 0;
+      dirtyX1 = static_cast<uint16_t>(Render_Width - 1);
+      dirtyY1 = static_cast<uint16_t>(Render_Height - 1);
+    }
+    const uint16_t dirtyW = static_cast<uint16_t>(dirtyX1 - dirtyX0 + 1);
+    const uint16_t dirtyH = static_cast<uint16_t>(dirtyY1 - dirtyY0 + 1);
+    display.startWrite();
+    display.setAddrWindow(dirtyX0, dirtyY0, dirtyW, dirtyH);
+    for (uint16_t row = 0; row < dirtyH; ++row) {
+      const uint16_t srcY = static_cast<uint16_t>(dirtyY0 + row);
+      uint16_t *rowPtr = &Frame_Back_Current[(static_cast<size_t>(srcY) * Render_Width) + dirtyX0];
+      display.writePixels(rowPtr, dirtyW, true, false);
+    }
+    display.endWrite();
+  }
+  uint16_t *tmp = Frame_Back_Previous;
+  Frame_Back_Previous = Frame_Back_Current;
+  Frame_Back_Current = tmp;
+  Frame_Have_Previous = true;
+}
 
 // Load Calibration
 static bool loadCompassCalibrationFromNVS() {
@@ -343,34 +419,62 @@ float readTapSignalX(uint64_t nowMS) {
   return envelope;
 }
 
-// Triple-tap
-bool detectTripleTap(uint64_t nowMS) {
+// penta-tap
+bool detectpentaTap(uint64_t nowMS) {
   const float tapSignal = readTapSignalX(nowMS);
-  if (tripleTapCount > 0 && (nowMS - tripleTapFirstMS) > Tap_Window_MS) {
-    tripleTapCount= 0;
-    tripleTapAboveThresh = false;
+  if (pentaTapCount > 0 && (nowMS - pentaTapFirstMS) > Tap_Window_MS) {
+    pentaTapCount= 0;
+    pentaTapAboveThresh = false;
   }
   bool newTap = false;
   if (tapSignal > Tap_Threshold_G) {
-    if (!tripleTapAboveThresh) {
-      tripleTapAboveThresh = true;
-      if (tripleTapCount == 0 || (nowMS - tripleTapLastMS) >= Tap_Min_Spacing_MS) {
+    if (!pentaTapAboveThresh) {
+      pentaTapAboveThresh = true;
+      if (pentaTapCount == 0 || (nowMS - pentaTapLastMS) >= Tap_Min_Spacing_MS) {
         newTap = true;
       }
     }
   } else if (Tap_Instant_Signal_G < Tap_Release_Threshold_G) {
-    tripleTapAboveThresh = false;
+    pentaTapAboveThresh = false;
   }
   if (newTap) {
-    if (tripleTapCount == 0) tripleTapFirstMS = nowMS;
-    tripleTapCount++;
-    tripleTapLastMS = nowMS;
-    if (tripleTapCount >= 3) {
-      tripleTapCount = 0;
+    if (pentaTapCount == 0) pentaTapFirstMS = nowMS;
+    pentaTapCount++;
+    pentaTapLastMS = nowMS;
+    if (pentaTapCount >= 5) {
+      pentaTapCount = 0;
       return true;
     }
   }
   return false;
+}
+
+// Display Centre Text 
+void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colour) {
+  int16_t x1 = 0;
+  int16_t y1 = 0;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  display.setTextSize(textSize);
+  display.setTextWrap(false);
+  display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+  const int16_t x = ((display.width() - static_cast<int16_t>(w)) / 2) - x1;
+  display.setCursor(x, y);
+  display.setTextColor(colour);
+  display.print(text);
+}
+
+// Display Column-Centred Text
+void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t textSize, uint16_t colour) {
+  int16_t x1 = 0, y1 = 0;
+  uint16_t w = 0, h = 0;
+  target.setTextSize(textSize);
+  target.setTextWrap(false);
+  target.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+  const int16_t x = colX + ((colW - static_cast<int16_t>(w)) / 2) - x1;
+  target.setCursor(x, y);
+  target.setTextColor(colour, ST77XX_BLACK);
+  target.print(text);
 }
 
 // Backlight Level
@@ -415,25 +519,40 @@ static float readCompassHeading() {
 
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
-  mag_samples_xyz.reserve(3U * 10000U);
+  constexpr uint32_t Calibration_Sample_Period_MS = 20;
+  constexpr size_t Calibration_Max_Samples = 10000U;
+  Last_Calibration_Sample_Count = 0;
+  Last_Calibration_Elapsed_MS = 0;
+  mag_samples_xyz.reserve(3U * Calibration_Max_Samples);
   const uint32_t start_ms = millis();
+  uint32_t last_sample_ms = start_ms;
   while ((millis() - start_ms) < Compass_Calibration_Duration_MS) {
-    if (digitalRead(DRDY_Pin) == HIGH) {
+    const uint32_t now_ms = millis();
+    if ((now_ms - last_sample_ms) >= Calibration_Sample_Period_MS) {
+      if ((mag_samples_xyz.size() / 3U) >= Calibration_Max_Samples) {
+        break;
+      }
       float raw_mag[3] = {0.0f, 0.0f, 0.0f};
       readQmcAxesTransformed(raw_mag);
       mag_samples_xyz.push_back(raw_mag[0]);
       mag_samples_xyz.push_back(raw_mag[1]);
       mag_samples_xyz.push_back(raw_mag[2]);
+      last_sample_ms = now_ms;
     }
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
+  Last_Calibration_Elapsed_MS = millis() - start_ms;
+  Last_Calibration_Sample_Count = mag_samples_xyz.size() / 3U;
   return true;
 }
 
 // Compass Calibration - Computation
 static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz) {
   const size_t sample_count = mag_samples_xyz.size() / 3U;
+  Last_Calibration_Fail_Reason = CalibrationFailReason::None;
   if (sample_count < 50U) {
     Last_Calibration_Method = CompassCalibrationMethod::Error;
+    Last_Calibration_Fail_Reason = CalibrationFailReason::TooFewSamples;
     return false;
   }
   CompassCalibrationMatrices fitted = {};
@@ -444,11 +563,13 @@ static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz)
           &fitted,
           &fit_method)) {
     Last_Calibration_Method = CompassCalibrationMethod::Error;
+    Last_Calibration_Fail_Reason = CalibrationFailReason::FitFailed;
     return false;
   }
   Compass_Matrices = fitted;
   if (!compassSetCalibrationMatrices(&Compass_Matrices)) {
     Last_Calibration_Method = CompassCalibrationMethod::Error;
+    Last_Calibration_Fail_Reason = CalibrationFailReason::ApplyFailed;
     return false;
   }
   saveCompassCalibrationToNVS(Compass_Matrices);
@@ -466,35 +587,95 @@ static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz)
   Last_Calibration_Quality = {};
   compassScoreCalibrationQuality(
       mag_samples_xyz.data(), sample_count, &Compass_Matrices, &Last_Calibration_Quality);
+  if (!Last_Calibration_Quality.is_valid) {
+    Last_Calibration_Fail_Reason = CalibrationFailReason::InvalidQuality;
+  }
   return true;
 }
 
-// Display Centre Text 
-void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colour) {
-  int16_t x1 = 0;
-  int16_t y1 = 0;
-  uint16_t w = 0;
-  uint16_t h = 0;
-  display.setTextSize(textSize);
-  display.setTextWrap(false);
-  display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-  const int16_t x = ((display.width() - static_cast<int16_t>(w)) / 2) - x1;
-  display.setCursor(x, y);
-  display.setTextColor(colour);
-  display.print(text);
+// Compass Calibration - Diagnostics Display
+static void drawCalibrationDiagnostics(bool calibration_ok) {
+  display.fillScreen(ST77XX_BLACK);
+  float sample_rate_hz = 0.0f;
+  if (Last_Calibration_Elapsed_MS > 0) {
+    sample_rate_hz = (1000.0f * static_cast<float>(Last_Calibration_Sample_Count)) /
+                     static_cast<float>(Last_Calibration_Elapsed_MS);
+  }
+  display.setTextColor(ST77XX_WHITE);
+  display.setTextSize(4);
+  display.setCursor(8, 10);
+  display.print(calibration_ok ? "Success" : "Failed");
+  display.setTextSize(2);
+  display.setCursor(8, 78);
+  display.print("Method: ");
+  display.print(compassCalibrationMethodText(Last_Calibration_Method));
+  display.setCursor(8, 102);
+  display.print("Reason: ");
+  display.print(calibrationFailReasonText(Last_Calibration_Fail_Reason));
+  display.setCursor(8, 126);
+  display.print("Samples: ");
+  display.print(static_cast<unsigned int>(Last_Calibration_Sample_Count));
+  display.setCursor(8, 150);
+  display.print("Rate Hz: ");
+  display.print(sample_rate_hz, 1);
+  display.setCursor(8, 174);
+  display.print("Time ms: ");
+  display.print(static_cast<unsigned long>(Last_Calibration_Elapsed_MS));
+  display.setCursor(8, 198);
+  display.print("Quality: ");
+  display.print(Last_Calibration_Quality.is_valid ? "valid" : "invalid");
 }
 
-// Display Column-Centred Text
-void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t textSize, uint16_t colour) {
-  int16_t x1 = 0, y1 = 0;
-  uint16_t w = 0, h = 0;
-  target.setTextSize(textSize);
-  target.setTextWrap(false);
-  target.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-  const int16_t x = colX + ((colW - static_cast<int16_t>(w)) / 2) - x1;
-  target.setCursor(x, y);
-  target.setTextColor(colour, ST77XX_BLACK);
-  target.print(text);
+// Calibration Score Display
+static void drawCalibrationScore() {
+  display.fillScreen(ST77XX_BLACK);
+  drawCentreText("Result", 10, 3, ST77XX_CYAN);
+  if (!Last_Calibration_Quality.is_valid) {
+    drawCentreText("N/A", 80, 4, ST77XX_RED);
+    return;
+  }
+  // Score percentage colour
+  const uint8_t score = static_cast<uint8_t>(Last_Calibration_Quality.score_percent + 0.5f);
+  uint16_t score_colour;
+  if (score >= 80) {
+    score_colour = ST77XX_GREEN;
+  } else if (score >= 60) {
+    score_colour = ST77XX_YELLOW;
+  } else if (score >= 40) {
+    score_colour = ST77XX_ORANGE;
+  } else {
+    score_colour = ST77XX_RED;
+  }
+  display.setTextSize(3);
+  display.setTextColor(score_colour);
+  display.setCursor(10, 0);
+  display.print("Score: ");
+  display.print(score);
+  display.print("%");
+  display.setTextSize(2);
+  display.setTextColor(ST77XX_WHITE);
+  display.setCursor(10, 50);
+  display.print("Count: ");
+  display.print(Last_Calibration_Quality.used_sample_count);
+  display.setCursor(10, 80);
+  display.print("Span: ");
+  display.print(static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
+  display.setCursor(10, 110);
+  display.print("Oct: ");
+  display.print(static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
+  display.print("%");
+  display.setCursor(10, 140);
+  display.print("PCA: ");
+  display.print(static_cast<unsigned int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
+  display.print("%");
+  display.setCursor(10, 170);
+  display.print("Residual: ");
+  display.print(static_cast<unsigned int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
+  display.print("%");
+  display.setCursor(10, 200);
+  display.print("Rad Std: ");
+  display.print(static_cast<unsigned int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
+  display.print("%");
 }
 
 // Timer
@@ -538,26 +719,6 @@ uint8_t readBatteryPercentage() {
   return 0;
 }
 
-// Battery Percentage
-uint8_t batteryPercentage(float Battery_Voltage) {
-  if (Battery_Voltage <= Voltage_Table[0]) {
-    return Percentage_Table[0];
-  }
-  if (Battery_Voltage >= Voltage_Table[Battery_Table_Size - 1]) {
-    return Percentage_Table[Battery_Table_Size - 1];
-  }
-  for (size_t index = 0; index < (Battery_Table_Size - 1); ++index) {
-    float lower = Voltage_Table[index];
-    float upper = Voltage_Table[index + 1];
-    if (Battery_Voltage < upper) {
-      return ((Battery_Voltage - lower) < (upper - Battery_Voltage))
-                 ? Percentage_Table[index]
-                 : Percentage_Table[index + 1];
-    }
-  }
-  return 0;
-}
-
 // Battery Indicator
 void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
   uint16_t fillColor = ST77XX_GREEN;
@@ -567,45 +728,48 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
     fillColor = ST77XX_YELLOW;
   }
   constexpr int16_t outlineW = 40;
-  constexpr int16_t outlineH = 12;
-  constexpr int16_t tipW = 3;
+  constexpr int16_t outlineH = 14;
   constexpr int16_t padding = 3;
   const int16_t outlineX = 216;
   const int16_t outlineY = 16;
   const int16_t fillWidth = map(percentage, 0, 100, 0, outlineW - (padding * 2));
   target.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
   target.drawRect(outlineX, outlineY, outlineW, outlineH, ST77XX_WHITE);
-  target.fillRect(outlineX + outlineW, outlineY + 5, tipW, outlineH - 10, ST77XX_WHITE);
+  target.fillRect(outlineX + outlineW, outlineY + 5, 4, outlineH - 10, ST77XX_WHITE);
   target.fillRect(outlineX + padding, outlineY + padding, fillWidth, outlineH - (padding * 2), fillColor);
 }
 
-// Heading Display
+// Heading Block
 void drawHeadingValue(Adafruit_GFX &target, int16_t y, float direction) {
   int heading = static_cast<int>(direction + 0.5f);
   if (heading == 360) {
     heading = 0;
   }
-  char headingString[6];
-  snprintf(headingString, sizeof(headingString), "-%03u-", heading);
-  int16_t x1 = 0;
-  int16_t y1 = 0;
-  uint16_t textW = 0;
-  uint16_t textH = 0;
-  target.setTextSize(3);
-  target.getTextBounds(headingString, 0, 0, &x1, &y1, &textW, &textH);
-  target.setCursor(280 - static_cast<int16_t>(textW), y);
+  char headingString[4];
+  snprintf(headingString, sizeof(headingString), "%03u", heading);
   target.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
+  target.setTextSize(3);
+  target.setCursor(172, y + 4);
+  target.print("-");
+  target.setCursor(262, y + 4);
+  target.print("-");
+  target.setTextSize(4);
+  target.setCursor(190, y);
   target.print(headingString);
 }
 
-// Compass Display
+// Compass Block
 void drawCompassBanner(Adafruit_GFX &target, float direction) {
   const int16_t centerX = 140;
-  const int16_t compassY = 200;
+  const int16_t compassY = 202;
+  target.setTextWrap(false);
+  target.fillRect(0, compassY + 12, 280, 37, ST77XX_BLACK);
+  target.drawFastHLine(0, 201, 280, ST77XX_WHITE);
+  target.fillTriangle(136, 203, 144, 203, 140, 212, ST77XX_CYAN);
+  target.drawLine(140, 212, 140, 239, ST77XX_CYAN);
   const float pixelsPerDegree = 280.0f / 180.0f;
   const int16_t majorTickBottomY = compassY + 10;
   const int16_t minorTickBottomY = compassY + 5;
-  const int16_t labelY = compassY + 15;
   for (int tickDegrees = 45; tickDegrees < 360; tickDegrees += 90) {
     float delta = static_cast<float>(tickDegrees) - direction;
     if (delta > 180.0f) {
@@ -642,164 +806,30 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
     int16_t y1 = 0;
     uint16_t labelW = 0;
     uint16_t labelH = 0;
-    target.setTextSize(2);
+    target.setTextSize(marker.textSize);
     target.getTextBounds(marker.label, 0, 0, &x1, &y1, &labelW, &labelH);
     target.drawLine(tickX, compassY + 1, tickX, majorTickBottomY, ST77XX_WHITE);
-    target.setTextColor(ST77XX_WHITE);
-    target.setCursor(tickX - static_cast<int16_t>(labelW / 2), labelY);
+    target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    target.setCursor(tickX - static_cast<int16_t>(labelW / 2), 218);
     target.print(marker.label);
   }
 }
 
-static bool initFrameBuffers() {
-  Render_Width = static_cast<uint16_t>(display.width());
-  Render_Height = static_cast<uint16_t>(display.height());
-  Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
-
-  Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
-  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
-    return false;
-  }
-
-  Frame_Back_Previous = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  Frame_Back_Current = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) {
-    return false;
-  }
-
-  memset(Frame_Back_Previous, 0, Frame_Buffer_Bytes);
-  memset(Frame_Back_Current, 0, Frame_Buffer_Bytes);
-  Frame_Have_Previous = false;
-  return true;
-}
-
-static void flushDirtyRectFromPSRAM() {
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
-    return;
-  }
-
-  uint16_t dirtyX0 = Render_Width;
-  uint16_t dirtyY0 = Render_Height;
-  uint16_t dirtyX1 = 0;
-  uint16_t dirtyY1 = 0;
-  bool hasDirty = !Frame_Have_Previous;
-
-  if (!hasDirty) {
-    for (uint16_t y = 0; y < Render_Height; ++y) {
-      const uint16_t rowOffset = static_cast<uint16_t>(y * Render_Width);
-      int16_t left = -1;
-      int16_t right = -1;
-      for (uint16_t x = 0; x < Render_Width; ++x) {
-        const uint16_t idx = static_cast<uint16_t>(rowOffset + x);
-        if (Frame_Back_Current[idx] != Frame_Back_Previous[idx]) {
-          if (left < 0) {
-            left = static_cast<int16_t>(x);
-          }
-          right = static_cast<int16_t>(x);
-        }
-      }
-      if (left >= 0) {
-        hasDirty = true;
-        if (y < dirtyY0) dirtyY0 = y;
-        if (y > dirtyY1) dirtyY1 = y;
-        if (static_cast<uint16_t>(left) < dirtyX0) dirtyX0 = static_cast<uint16_t>(left);
-        if (static_cast<uint16_t>(right) > dirtyX1) dirtyX1 = static_cast<uint16_t>(right);
-      }
-    }
-  }
-
-  if (hasDirty) {
-    if (!Frame_Have_Previous) {
-      dirtyX0 = 0;
-      dirtyY0 = 0;
-      dirtyX1 = static_cast<uint16_t>(Render_Width - 1);
-      dirtyY1 = static_cast<uint16_t>(Render_Height - 1);
-    }
-
-    const uint16_t dirtyW = static_cast<uint16_t>(dirtyX1 - dirtyX0 + 1);
-    const uint16_t dirtyH = static_cast<uint16_t>(dirtyY1 - dirtyY0 + 1);
-
-    display.startWrite();
-    display.setAddrWindow(dirtyX0, dirtyY0, dirtyW, dirtyH);
-    for (uint16_t row = 0; row < dirtyH; ++row) {
-      const uint16_t srcY = static_cast<uint16_t>(dirtyY0 + row);
-      uint16_t *rowPtr = &Frame_Back_Current[(static_cast<size_t>(srcY) * Render_Width) + dirtyX0];
-      display.writePixels(rowPtr, dirtyW, true, false);
-    }
-    display.endWrite();
-  }
-
-  uint16_t *tmp = Frame_Back_Previous;
-  Frame_Back_Previous = Frame_Back_Current;
-  Frame_Back_Current = tmp;
-  Frame_Have_Previous = true;
-}
-
-// Calibration Score Display
-static void drawCalibrationScore() {
-  display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Result", 10, 3, ST77XX_CYAN);
-  if (!Last_Calibration_Quality.is_valid) {
-    drawCentreText("N/A", 80, 4, ST77XX_RED);
-    return;
-  }
-  // Score percentage colour
-  const uint8_t score = static_cast<uint8_t>(Last_Calibration_Quality.score_percent + 0.5f);
-  uint16_t score_colour;
-  if (score >= 80) {
-    score_colour = ST77XX_GREEN;
-  } else if (score >= 60) {
-    score_colour = ST77XX_YELLOW;
-  } else if (score >= 40) {
-    score_colour = ST77XX_ORANGE;
-  } else {
-    score_colour = ST77XX_RED;
-  }
-  display.setTextSize(3);
-  display.setTextColor(score_colour);
-  display.setCursor(10, 50);
-  display.print("Score: ");
-  display.print(score);
-  display.print("%");
-  display.setTextColor(ST77XX_WHITE);
-  display.setCursor(10, 90);
-  display.print("Count: ");
-  display.print(Last_Calibration_Quality.used_sample_count);
-  display.setTextSize(2);
-  display.setCursor(10, 130);
-  display.print("Span: ");
-  display.print(static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
-  display.setCursor(10, 162);
-  display.print("Oct: ");
-  display.print(static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
-  display.print("%");
-  display.setCursor(10, 194);
-  display.print("PCA: ");
-  display.print(static_cast<unsigned int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
-  display.print("%");
-  display.setCursor(10, 226);
-  display.print("Residual: ");
-  display.print(static_cast<unsigned int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
-  display.print("%");
-  display.setCursor(10, 258);
-  display.print("Rad Std: ");
-  display.print(static_cast<unsigned int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
-  display.print("%");
-}
-
-// Bottom Timer Display Update
+// Main Display
 void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, const DecoResult &deco) {
   // Draw depth block on top-left
-  uint8_t depthInteger = static_cast<uint8_t>(Depth);
-  uint8_t depthDecimal = static_cast<uint8_t>(Depth * 10.0f + 0.5f) % 10;
+  const int32_t depthTenths = static_cast<int32_t>(Depth * 10.0f + ((Depth >= 0.0f) ? 0.5f : -0.5f));
+  const int32_t depthTenthsAbs = (depthTenths >= 0) ? depthTenths : -depthTenths;
+  const uint16_t depthInteger = static_cast<uint16_t>(depthTenthsAbs / 10);
+  const uint8_t depthDecimal = static_cast<uint8_t>(depthTenthsAbs % 10);
   char integerPart[3];
   char decimalPart[2];
   const char *unitPart = "m";
   snprintf(integerPart, sizeof(integerPart), "%2u", depthInteger);
   snprintf(decimalPart, sizeof(decimalPart), "%u", depthDecimal);
   constexpr uint8_t integerSize = 12;
-  constexpr uint8_t decimalSize = 6;
-  constexpr uint8_t dotSize = 2;
+  constexpr uint8_t decimalSize = 8;
+  constexpr uint8_t dotSize = 3;
   const char *dotPart = ".";
   int16_t x1 = 0;
   int16_t y1 = 0;
@@ -819,7 +849,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
   target.setTextSize(dotSize);
   target.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
-  const int16_t depthX = 26;
+  const int16_t depthX = 16;
   const int16_t depthY = 12;
   const int16_t depthBottom = depthY + static_cast<int16_t>(integerH);
   const int16_t dotX = depthX + static_cast<int16_t>(integerW) + 2;
@@ -842,20 +872,9 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextSize(decimalSize);
   target.setCursor(unitX, unitY);
   target.print(unitPart);
+  target.drawFastHLine(0, depthBottom + 2, 280, ST77XX_BLUE);
   // Draw battery indicator on top right
   drawBatteryIndicator(target, Battery_Percentage);
-  // Draw loop usage left of battery
-  char loopUsageStr[9];
-  snprintf(loopUsageStr, sizeof(loopUsageStr), "CPU:%3u%%", Loop_Usage_Percent);
-  target.setTextSize(1);
-  target.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
-  {
-    int16_t ux1 = 0, uy1 = 0;
-    uint16_t uW = 0, uH = 0;
-    target.getTextBounds(loopUsageStr, 0, 0, &ux1, &uy1, &uW, &uH);
-    target.setCursor(210 - static_cast<int16_t>(uW), 18);
-    target.print(loopUsageStr);
-  }
   // Current GF below battery
   char gfStr[6];
   if (ripNtear_Mode) {
@@ -865,44 +884,47 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   }
   target.setTextSize(1);
   target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
-  target.setCursor(221, 32);
+  target.setCursor(240, 36);
   target.print(gfStr);
   // Draw timer below depth
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
-  target.setTextSize(3);
+  target.setTextSize(4);
   target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
-  target.setCursor(0, 120);
+  target.setCursor(0, 118);
   target.print(timerString);
   // Draw heading right of timer
-  drawHeadingValue(target, 120, Heading);
+  drawHeadingValue(target, 118, Heading);
   // Draw Deco table below timer and heading
-  target.drawFastHLine(0, 155, 280, ST77XX_WHITE);
-  target.drawFastVLine(70, 156, 44, ST77XX_WHITE);
-  target.drawFastVLine(140, 156, 44, ST77XX_WHITE);
-  target.drawFastVLine(210, 156, 44, ST77XX_WHITE);
+  target.drawFastHLine(0, 155, 280, ST77XX_BLUE);
+  target.drawFastHLine(0, 198, 280, ST77XX_BLUE);
+  target.drawFastVLine(0, 156, 42, ST77XX_BLUE);
+  target.drawFastVLine(70, 156, 42, ST77XX_BLUE);
+  target.drawFastVLine(140, 156, 42, ST77XX_BLUE);
+  target.drawFastVLine(210, 156, 42, ST77XX_BLUE);
+  target.drawFastVLine(279, 156, 42, ST77XX_BLUE);
   constexpr int16_t leftColX = 1;
   constexpr int16_t rightColX = 141;
   constexpr int16_t cellW = 68;
   constexpr int16_t topTitleY = 128;
   target.setTextSize(2);
   target.setTextColor(ST77XX_CYAN);
-  target.setCursor(0, 170);
+  target.setCursor(8, 169);
   target.print("D");
-  target.setCursor(74, 170);
+  target.setCursor(78, 169);
   target.print("S");
   target.setTextSize(1);
-  target.setCursor(144, 168);
+  target.setCursor(148, 162);
   target.print("T");
-  target.setCursor(144, 178);
+  target.setCursor(148, 172);
   target.print("T");
-  target.setCursor(144, 188);
+  target.setCursor(148, 182);
   target.print("S");
-  target.setCursor(214, 168);
+  target.setCursor(218, 162);
   target.print("s");
-  target.setCursor(214, 178);
+  target.setCursor(218, 172);
   target.print("G");
-  target.setCursor(214, 188);
+  target.setCursor(218, 182);
   target.print("F");
   uint16_t surfGfColor = ST77XX_GREEN;
   if (deco.surfGF > 100) {
@@ -915,16 +937,12 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   snprintf(timeStr, sizeof(timeStr), "%3u", deco.stopTime);
   snprintf(ttsStr, sizeof(ttsStr), "%3u", deco.timeToSurface);
   snprintf(sGfStr, sizeof(sGfStr), "%3u", deco.surfGF);
-  drawColCentreText(target, stopStr, 20, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(target, timeStr, 94, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(target, ttsStr, 158, 36, 170, 2, ST77XX_WHITE);
-  drawColCentreText(target, sGfStr, 228, 36, 170, 2, surfGfColor);
+  drawColCentreText(target, stopStr, 28, 36, 169, 2, ST77XX_WHITE);
+  drawColCentreText(target, timeStr, 98, 36, 169, 2, ST77XX_WHITE);
+  drawColCentreText(target, ttsStr, 166, 36, 169, 2, ST77XX_WHITE);
+  drawColCentreText(target, sGfStr, 236, 36, 169, 2, surfGfColor);
   // Draw compass banner at bottom
-  target.fillRect(0, 201, 280, 39, ST77XX_BLACK);
-  target.drawFastHLine(0, 200, 280, ST77XX_WHITE);
   drawCompassBanner(target, Heading);
-  target.fillTriangle(136, 202, 144, 202, 140, 210, ST77XX_CYAN);
-  target.drawLine(140, 210, 140, 240, ST77XX_CYAN);
 }
 
 
@@ -933,7 +951,7 @@ void setup() {
   esp_wifi_stop();
   esp_bt_controller_disable();
   esp_pm_config_esp32s3_t pm_config = {
-    .max_freq_mhz = 160,
+    .max_freq_mhz = 80,
     .min_freq_mhz = 40,
     .light_sleep_enable = true
   };
@@ -947,8 +965,8 @@ void setup() {
   display.setSPISpeed(40000000); 
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Dive", 60, 6, ST77XX_WHITE);
-  drawCentreText("Computer", 152, 6, ST77XX_WHITE);
+  drawCentreText("Dive", 60, 5, ST77XX_WHITE);
+  drawCentreText("Computer", 140, 5, ST77XX_WHITE);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -975,20 +993,11 @@ void setup() {
   delay(10);
 
   // MS5837 initialisation
-  // sensor.init(sensorWire);
-  // sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
-  // sensor.setFluidDensity(Density);       // Set water density
-
-// --- TESTING --- //
-  Pressure_Sensor_Available = isMs5837Present();
-  if (Pressure_Sensor_Available) {
-    Pressure_Sensor_Available = sensor.init(sensorWire);
-    if (Pressure_Sensor_Available) {
-      sensor.setModel(MS5837::MS5837_30BA);
-      sensor.setFluidDensity(Density);
-    }
+  sensorAvailable = sensor.init(sensorWire);
+  if (sensorAvailable) {
+    sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
+    sensor.setFluidDensity(Density);       // Set water density
   }
-// --- TESTING --- //
 
   // BH1750 initialisation
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_I2C_Address, &Wire);  // 4 lux, 16 ms
@@ -1003,7 +1012,6 @@ void setup() {
 
   // QMC5883P initialisation
   pinMode(Calibration_Button_Pin, INPUT_PULLUP);
-  pinMode(DRDY_Pin, INPUT);
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
@@ -1028,6 +1036,7 @@ void setup() {
     drawCentreText("Frame Buffer", 96, 3, ST77XX_RED);
     drawCentreText("Alloc Failed", 144, 3, ST77XX_RED);
     delay(Message_MS);
+    display.fillScreen(ST77XX_BLACK);
   }
 
   // Display update on one core
@@ -1036,7 +1045,6 @@ void setup() {
         TickType_t lastWakeTick = xTaskGetTickCount();
         const TickType_t displayPeriodTicks = pdMS_TO_TICKS(Display_Update_MS);
         for (;;) {
-          const uint64_t frameStartMS = millis();
           if (Frame_Canvas != nullptr && Frame_Back_Current != nullptr) {
             Frame_Canvas->fillScreen(ST77XX_BLACK);
             updateDisplay(*Frame_Canvas, Depth, Minutes, Seconds, lastDecoResult);
@@ -1044,10 +1052,6 @@ void setup() {
             flushDirtyRectFromPSRAM();
           } else {
             updateDisplay(display, Depth, Minutes, Seconds, lastDecoResult);
-          }
-          const uint64_t frameElapsedMS = millis() - frameStartMS;
-          if (Display_Update_MS > 0) {
-            Loop_Usage_Percent = (frameElapsedMS * 100ULL + (Display_Update_MS / 2ULL)) / Display_Update_MS;
           }
           if (displayPeriodTicks > 0) {
             vTaskDelayUntil(&lastWakeTick, displayPeriodTicks);
@@ -1076,9 +1080,9 @@ void setup() {
           if ((nowMS - lastFastUpdateMS) >= Fast_Update_MS) {
             lastFastUpdateMS = nowMS;
             // Tap detection
-            if (detectTripleTap(nowMS)) {
-              ripNtear_Mode = true;
-              ripNtear(true);
+            if (detectpentaTap(nowMS)) {
+              ripNtear_Mode = !ripNtear_Mode;
+              ripNtear(ripNtear_Mode);
               Deco_Last_Update_MS = nowMS - Deco_Update_MS;
             }
             // Calibration button detection
@@ -1096,7 +1100,7 @@ void setup() {
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Compass", 70, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
-                delay(100);
+                delay(Message_MS);
                 lastWakeTick = xTaskGetTickCount();
               } else {
                 if (Display_Task_Handle != nullptr) {
@@ -1109,16 +1113,11 @@ void setup() {
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
                 const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
-                display.fillScreen(ST77XX_BLACK);
-                if (calibration_ok) {
-                  drawCentreText("Done", 98, 4, ST77XX_GREEN);
-                } else {
-                  drawCentreText("Failed", 98, 4, ST77XX_RED);
-                }
-                drawCentreText(compassCalibrationMethodText(Last_Calibration_Method), 140, 2, ST77XX_WHITE);
-                delay(Message_MS);
+                drawCalibrationDiagnostics(calibration_ok);
+                delay(Message_MS * 5);
                 drawCalibrationScore();
                 delay(Message_MS * 5);
+                display.fillScreen(ST77XX_BLACK);
                 Calibration_Armed = false;
                 Deco_Last_Update_MS = nowMS - Deco_Update_MS;
                 if (Display_Task_Handle != nullptr) {
@@ -1136,8 +1135,16 @@ void setup() {
             lastSlowUpdateMS = nowMS;
             // Depth
             float pressureMbar = MBAR_PER_ATM;
-            readDepthAndPressure(Depth, pressureMbar);
-            const float pressureAtm = pressureMbar / MBAR_PER_ATM;
+            float pressureAtm = 1.0f;
+            if (sensorAvailable) {
+              sensor.read();
+              Depth = sensor.depth() - Depth_Offset;
+              pressureMbar = sensor.pressure();
+              pressureAtm = pressureMbar / MBAR_PER_ATM;
+            } else {
+              Depth = 99.9f;        // Fall back if MS5837 unavailable
+              pressureAtm = 11.0f;  // Fall back if MS5837 unavailable
+            }
             //Timer
             updateTimer(Depth, nowMS);
             // Backlight and battery
