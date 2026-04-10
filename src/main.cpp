@@ -55,22 +55,22 @@ constexpr uint8_t BH1750_I2C_Address = 0x23;
 // LCD Constants
 constexpr uint16_t LCD_Width = 260;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint8_t Low_Battery_Threshold = 20;       // Dim screen below 20% battery
-constexpr uint8_t Critical_Battery_Threshold = 0;   // Deep sleep below 0% battery
-constexpr float Battery_Divider_Ratio = 3.0f;       // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 10000.0f;         // Lux level at high backlight
-constexpr uint8_t Backlight_Low = 1;                // Low backlight in dark surroundings
-constexpr uint8_t Backlight_High = 255;             // High backlight in bright surroundings
-constexpr uint32_t Message_MS = 2000;               // Display messages for 2 seconds
-constexpr uint32_t Display_Update_MS = 50;          // Display refresh rate: 20 Hz
-constexpr uint32_t Fast_Update_MS = 100;            // Heading/tap/button checks: 10 Hz
-constexpr uint32_t Slow_Update_MS = 1000;           // Depth sensor and ADC updates: 1 Hz
-constexpr uint32_t Deco_Update_MS = 10000;          // Decompression model updates: 0.1 Hz
+constexpr uint8_t Low_Battery_Threshold = 20;      // Dim screen below 20% battery
+constexpr uint8_t Critical_Battery_Threshold = 0;  // Deep sleep below 0% battery
+constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
+constexpr float Ambient_Lux_Max = 10000.0f;        // Lux level at high backlight
+constexpr uint8_t Backlight_Low = 1;               // Low backlight in dark surroundings
+constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
+constexpr uint32_t Message_MS = 2000;              // Display messages for 2 seconds
+constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
+constexpr uint32_t Fast_Update_MS = 100;           // Heading/tap/button checks: 10 Hz
+constexpr uint32_t Slow_Update_MS = 1000;          // Depth sensor and ADC updates: 1 Hz
+constexpr uint32_t Deco_Update_MS = 10000;         // Decompression model updates: 0.1 Hz
 
 // Compass Constants
-constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
-constexpr float Magnetometer_Lsb_Per_Gauss = 15000.0f;        // QMC5883P at FS_2G: 15000 LSB/Gauss
-constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
+constexpr float Reference_Field_Gauss = 0.49f;               // UK average magnetic field strength
+constexpr float Magnetometer_Lsb_Per_Gauss = 15000.0f;       // QMC5883P at FS_2G: 15000 LSB/Gauss
+constexpr uint32_t Compass_Calibration_Duration_MS = 60000;  // 60 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Hard_Iron_X_Key = "hi_x";
@@ -92,8 +92,8 @@ constexpr uint32_t Tap_Window_MS = 5000;                // Taps window
 constexpr uint32_t Tap_Min_Spacing_MS = 200;            // Minimum gap between taps
 
 // Button Constants
-constexpr uint32_t Button_Debounce_MS = 50;         // Button debounce time 50 ms
-constexpr uint32_t Calibration_Delay_MS = 5000;     // Delay 5 seconds before calibration
+constexpr uint32_t Button_Debounce_MS = 50;      // Button debounce time 50 ms
+constexpr uint32_t Calibration_Delay_MS = 5000;  // Delay 5 seconds before calibration
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -1075,7 +1075,6 @@ void setup() {
         uint64_t lastSlowUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-
           // 10 Hz
           if ((nowMS - lastFastUpdateMS) >= Fast_Update_MS) {
             lastFastUpdateMS = nowMS;
@@ -1129,7 +1128,6 @@ void setup() {
             // Compass
             Heading = readCompassHeading();
           }
-
           // 1 Hz
           if ((nowMS - lastSlowUpdateMS) >= Slow_Update_MS) {
             lastSlowUpdateMS = nowMS;
