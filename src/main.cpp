@@ -2,8 +2,6 @@
 // Power Management
 #include <esp_bt.h>
 #include <esp_wifi.h>
-#include <esp_timer.h>
-#include <esp_sleep.h>
 #include <esp_heap_caps.h>
 #include <esp_pm.h>
 // Peripherals
@@ -21,7 +19,9 @@
 #include <Preferences.h>
 #include <magnetometer_calibration.h>
 
+
 // Pins
+constexpr uint8_t Boot_Pin = 0;
 constexpr uint8_t Battery_Pin = 1;
 constexpr uint8_t DC_Pin = 4;
 constexpr uint8_t CS_Pin = 5;
@@ -35,7 +35,9 @@ constexpr uint8_t Sensor_VCC_Pin = 3;
 constexpr uint8_t Sensor_GND_Pin = 16;
 constexpr uint8_t Sensor_SCL_Pin = 17;
 constexpr uint8_t Sensor_SDA_Pin = 18;
-constexpr uint8_t Calibration_Button_Pin = 40;
+constexpr uint8_t Sys_Pin = 40;
+constexpr uint8_t Power_Pin = 41;
+
 
 // Define Objects
 SPIClass spi(FSPI);
@@ -55,11 +57,11 @@ constexpr uint8_t BH1750_I2C_Address = 0x23;
 // LCD Constants
 constexpr uint16_t LCD_Width = 260;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint8_t Low_Battery_Threshold = 20;      // Dim screen below 20% battery
-constexpr uint8_t Critical_Battery_Threshold = 0;  // Deep sleep below 0% battery
+constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen below 10% battery
+constexpr uint8_t Critical_Battery_Threshold = 1;  // Shut down below 1% battery
 constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
 constexpr float Ambient_Lux_Max = 10000.0f;        // Lux level at high backlight
-constexpr uint8_t Backlight_Low = 1;               // Low backlight in dark surroundings
+constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 2000;              // Display messages for 2 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
@@ -69,7 +71,7 @@ constexpr uint32_t Deco_Update_MS = 10000;         // Decompression model update
 
 // Compass Constants
 constexpr float Reference_Field_Gauss = 0.49f;               // UK average magnetic field strength
-constexpr float Magnetometer_Lsb_Per_Gauss = 15000.0f;       // QMC5883P at FS_2G: 15000 LSB/Gauss
+constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;        // QMC5883P at FS_8G: 3750 LSB/Gauss
 constexpr uint32_t Compass_Calibration_Duration_MS = 60000;  // 60 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
@@ -92,8 +94,8 @@ constexpr uint32_t Tap_Window_MS = 5000;                // Taps window
 constexpr uint32_t Tap_Min_Spacing_MS = 200;            // Minimum gap between taps
 
 // Button Constants
-constexpr uint32_t Button_Debounce_MS = 50;      // Button debounce time 50 ms
-constexpr uint32_t Calibration_Delay_MS = 5000;  // Delay 5 seconds before calibration
+constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
+constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay 10 seconds before calibration
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -132,10 +134,8 @@ float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
 // Calibration button
-bool Calibration_Armed = false;
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
-uint64_t Calibration_Start_MS = 0;
 uint64_t Button_Last_Change_MS = 0;
 // Tap detection
 uint8_t pentaTapCount = 0;
@@ -349,7 +349,7 @@ static void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matric
 
 // Compass Calibration Button
 bool calibrationButtonPressed(uint64_t nowMS) {
-  const uint8_t reading = static_cast<uint8_t>(digitalRead(Calibration_Button_Pin));
+  const uint8_t reading = static_cast<uint8_t>(digitalRead(Boot_Pin));
   if (reading != Button_Last_Reading) {
     Button_Last_Change_MS = nowMS;
     Button_Last_Reading = reading;
@@ -520,7 +520,7 @@ static float readCompassHeading() {
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
   constexpr uint32_t Calibration_Sample_Period_MS = 20;
-  constexpr size_t Calibration_Max_Samples = 10000U;
+  constexpr size_t Calibration_Max_Samples = 20000U;
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
   mag_samples_xyz.reserve(3U * Calibration_Max_Samples);
@@ -539,7 +539,6 @@ static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
       mag_samples_xyz.push_back(raw_mag[2]);
       last_sample_ms = now_ms;
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
   }
   Last_Calibration_Elapsed_MS = millis() - start_ms;
   Last_Calibration_Sample_Count = mag_samples_xyz.size() / 3U;
@@ -955,6 +954,11 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
 
 
 void setup() {
+  // Power on
+  pinMode(Power_Pin, OUTPUT);
+  digitalWrite(Power_Pin, HIGH);
+  delay(10);
+  pinMode(Sys_Pin, INPUT);
   // Power conservation
   esp_wifi_stop();
   esp_bt_controller_disable();
@@ -974,7 +978,7 @@ void setup() {
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
   drawCentreText("Dive", 60, 5, ST77XX_WHITE);
-  drawCentreText("Computer", 140, 5, ST77XX_WHITE);
+  drawCentreText("Computer", 130, 5, ST77XX_WHITE);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -1019,12 +1023,12 @@ void setup() {
   qmi.disableGyroscope();
 
   // QMC5883P initialisation
-  pinMode(Calibration_Button_Pin, INPUT_PULLUP);
+  pinMode(Boot_Pin, INPUT);
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
-      MagFullScaleRange::FS_2G,
-      50.0f,
+      MagFullScaleRange::FS_8G,
+      100.0f,
       MagOverSampleRatio::OSR_8,
       MagDownSampleRatio::DSR_8);
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
@@ -1093,45 +1097,27 @@ void setup() {
               Deco_Last_Update_MS = nowMS - Deco_Update_MS;
             }
             // Calibration button detection
-            if (calibrationButtonPressed(nowMS) && !Calibration_Armed) {
-              Calibration_Armed = true;
-              Calibration_Start_MS = nowMS;
-            }
-            // Calibration
-            if (Calibration_Armed) {
-              const uint64_t elapsedMs = nowMS - Calibration_Start_MS;
-              if (elapsedMs < Calibration_Delay_MS) {
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Compass", 70, 4, ST77XX_WHITE);
-                drawCentreText("Calibration", 126, 4, ST77XX_WHITE);
-                delay(Message_MS);
-                lastWakeTick = xTaskGetTickCount();
-              } else {
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
-                std::vector<float> mag_samples_xyz;
-                collectCompassSamples(mag_samples_xyz);
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
-                const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
-                drawCalibrationDiagnostics(calibration_ok);
-                delay(Message_MS * 5);
-                drawCalibrationScore();
-                delay(Message_MS * 5);
-                display.fillScreen(ST77XX_BLACK);
-                Calibration_Armed = false;
-                if (Display_Task_Handle != nullptr) {
-                  vTaskResume(Display_Task_Handle);
-                }
-                lastWakeTick = xTaskGetTickCount();
-                esp_restart();  // Restart after calibration
+            if (calibrationButtonPressed(nowMS)) {
+              if (Display_Task_Handle != nullptr) {
+                vTaskSuspend(Display_Task_Handle);
               }
+              display.fillScreen(ST77XX_BLACK);
+              drawCentreText("Compass", 60, 4, ST77XX_WHITE);
+              drawCentreText("Calibration", 130, 4, ST77XX_WHITE);
+              delay(Calibration_Delay_MS);
+              display.fillScreen(ST77XX_BLACK);
+              drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
+              std::vector<float> mag_samples_xyz;
+              collectCompassSamples(mag_samples_xyz);
+              display.fillScreen(ST77XX_BLACK);
+              drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
+              const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
+              drawCalibrationDiagnostics(calibration_ok);
+              delay(Message_MS * 5);
+              drawCalibrationScore();
+              delay(Message_MS * 5);
+              display.fillScreen(ST77XX_BLACK);
+              esp_restart();  // Restart after calibration
             }
             // Compass
             Heading = readCompassHeading();
@@ -1170,8 +1156,11 @@ void setup() {
               drawCentreText("Battery", 86, 4, ST77XX_RED);
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
-              digitalWrite(Backlight_Pin, LOW);
-              esp_deep_sleep_start();
+              digitalWrite(Power_Pin, HIGH);
+            }
+            // Power button
+            if (digitalRead(Sys_Pin) == HIGH) {
+              digitalWrite(Power_Pin, LOW);
             }
             // 0.1 Hz: ZHL-16C
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
