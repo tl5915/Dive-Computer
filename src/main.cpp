@@ -602,28 +602,36 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
                      static_cast<float>(Last_Calibration_Elapsed_MS);
   }
   display.setTextColor(ST77XX_WHITE);
-  display.setTextSize(4);
-  display.setCursor(8, 10);
+  uint16_t state_colour;
+  if (calibration_ok) {
+    state_colour = ST77XX_GREEN;
+  } else {
+    state_colour = ST77XX_RED;
+  }
+  display.setTextSize(3);
+  display.setTextColor(state_colour);
+  display.setCursor(10, 10);
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
-  display.setCursor(8, 78);
+  display.setTextColor(ST77XX_WHITE);
+  display.setCursor(10, 60);
   display.print("Method: ");
   display.print(compassCalibrationMethodText(Last_Calibration_Method));
-  display.setCursor(8, 102);
+  display.setCursor(10, 90);
   display.print("Reason: ");
   display.print(calibrationFailReasonText(Last_Calibration_Fail_Reason));
-  display.setCursor(8, 126);
+  display.setCursor(10, 120);
   display.print("Samples: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Sample_Count));
-  display.setCursor(8, 150);
+  display.setCursor(10, 150);
   display.print("Rate Hz: ");
   display.print(sample_rate_hz, 1);
-  display.setCursor(8, 174);
+  display.setCursor(10, 180);
   display.print("Time ms: ");
   display.print(static_cast<unsigned long>(Last_Calibration_Elapsed_MS));
-  display.setCursor(8, 198);
+  display.setCursor(10, 210);
   display.print("Quality: ");
-  display.print(Last_Calibration_Quality.is_valid ? "valid" : "invalid");
+  display.print(Last_Calibration_Quality.is_valid ? "Valid" : "Invalid");
 }
 
 // Calibration Score Display
@@ -648,31 +656,31 @@ static void drawCalibrationScore() {
   }
   display.setTextSize(3);
   display.setTextColor(score_colour);
-  display.setCursor(10, 0);
+  display.setCursor(10, 10);
   display.print("Score: ");
   display.print(score);
   display.print("%");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(10, 50);
+  display.setCursor(10, 60);
   display.print("Count: ");
   display.print(Last_Calibration_Quality.used_sample_count);
-  display.setCursor(10, 80);
+  display.setCursor(10, 90);
   display.print("Span: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
-  display.setCursor(10, 110);
+  display.setCursor(10, 120);
   display.print("Oct: ");
   display.print(static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 140);
+  display.setCursor(10, 150);
   display.print("PCA: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 170);
+  display.setCursor(10, 180);
   display.print("Residual: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 200);
+  display.setCursor(10, 210);
   display.print("Rad Std: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
   display.print("%");
@@ -1118,11 +1126,11 @@ void setup() {
                 delay(Message_MS * 5);
                 display.fillScreen(ST77XX_BLACK);
                 Calibration_Armed = false;
-                Deco_Last_Update_MS = nowMS - Deco_Update_MS;
                 if (Display_Task_Handle != nullptr) {
                   vTaskResume(Display_Task_Handle);
                 }
                 lastWakeTick = xTaskGetTickCount();
+                esp_restart();  // Restart after calibration
               }
             }
             // Compass
