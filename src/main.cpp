@@ -951,7 +951,7 @@ void setup() {
   esp_wifi_stop();
   esp_bt_controller_disable();
   esp_pm_config_esp32s3_t pm_config = {
-    .max_freq_mhz = 80,
+    .max_freq_mhz = 160,
     .min_freq_mhz = 40,
     .light_sleep_enable = true
   };
