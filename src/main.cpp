@@ -64,16 +64,16 @@ constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
 constexpr float Ambient_Lux_Max = 10000.0f;        // Lux level at high backlight
 constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
-constexpr uint32_t Message_MS = 2000;              // Display messages for 2 seconds
+constexpr uint32_t Message_MS = 5000;              // Display messages for 5 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
 constexpr uint32_t Fast_Update_MS = 100;           // Heading/tap/button checks: 10 Hz
 constexpr uint32_t Slow_Update_MS = 1000;          // Depth sensor and ADC updates: 1 Hz
 constexpr uint32_t Deco_Update_MS = 10000;         // Decompression model updates: 0.1 Hz
 
 // Compass Constants
-constexpr float Reference_Field_Gauss = 0.49f;               // UK average magnetic field strength
-constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;        // QMC5883P at FS_8G: 3750 LSB/Gauss
-constexpr uint32_t Compass_Calibration_Duration_MS = 60000;  // 60 seconds for compass calibration
+constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
+constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;         // QMC5883P at FS_8G: 3750 LSB/Gauss
+constexpr uint32_t Compass_Calibration_Duration_MS = 120000;  // 120 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Hard_Iron_X_Key = "hi_x";
@@ -420,7 +420,7 @@ float readTapSignalX(uint64_t nowMS) {
   return envelope;
 }
 
-// penta-tap
+// Penta-tap
 bool detectpentaTap(uint64_t nowMS) {
   const float tapSignal = readTapSignalX(nowMS);
   if (pentaTapCount > 0 && (nowMS - pentaTapFirstMS) > Tap_Window_MS) {
@@ -520,7 +520,7 @@ static float readCompassHeading() {
 
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
-  constexpr uint32_t Calibration_Sample_Period_MS = 20;
+  constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
   constexpr size_t Calibration_Max_Samples = 20000U;
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
@@ -610,26 +610,26 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
   }
   display.setTextSize(3);
   display.setTextColor(state_colour);
-  display.setCursor(10, 10);
+  display.setCursor(20, 10);
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(10, 60);
+  display.setCursor(20, 60);
   display.print("Method: ");
   display.print(compassCalibrationMethodText(Last_Calibration_Method));
-  display.setCursor(10, 90);
+  display.setCursor(20, 90);
   display.print("Reason: ");
   display.print(calibrationFailReasonText(Last_Calibration_Fail_Reason));
-  display.setCursor(10, 120);
+  display.setCursor(20, 120);
   display.print("Samples: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Sample_Count));
-  display.setCursor(10, 150);
+  display.setCursor(20, 150);
   display.print("Rate Hz: ");
   display.print(sample_rate_hz, 1);
-  display.setCursor(10, 180);
+  display.setCursor(20, 180);
   display.print("Time ms: ");
   display.print(static_cast<unsigned long>(Last_Calibration_Elapsed_MS));
-  display.setCursor(10, 210);
+  display.setCursor(20, 210);
   display.print("Quality: ");
   display.print(Last_Calibration_Quality.is_valid ? "Valid" : "Invalid");
 }
@@ -637,9 +637,8 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
 // Calibration Score Display
 static void drawCalibrationScore() {
   display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Result", 10, 3, ST77XX_CYAN);
   if (!Last_Calibration_Quality.is_valid) {
-    drawCentreText("N/A", 80, 4, ST77XX_RED);
+    drawCentreText("N/A", 20, 220, ST77XX_RED);
     return;
   }
   // Score percentage colour
@@ -656,31 +655,31 @@ static void drawCalibrationScore() {
   }
   display.setTextSize(3);
   display.setTextColor(score_colour);
-  display.setCursor(10, 10);
+  display.setCursor(20, 10);
   display.print("Score: ");
   display.print(score);
   display.print("%");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(10, 60);
+  display.setCursor(20, 60);
   display.print("Count: ");
   display.print(Last_Calibration_Quality.used_sample_count);
-  display.setCursor(10, 90);
+  display.setCursor(20, 90);
   display.print("Span: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
-  display.setCursor(10, 120);
+  display.setCursor(20, 120);
   display.print("Oct: ");
   display.print(static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 150);
+  display.setCursor(20, 150);
   display.print("PCA: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 180);
+  display.setCursor(20, 180);
   display.print("Residual: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
   display.print("%");
-  display.setCursor(10, 210);
+  display.setCursor(20, 210);
   display.print("Rad Std: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
   display.print("%");
@@ -980,8 +979,8 @@ void setup() {
   display.setSPISpeed(40000000); 
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Dive", 60, 5, ST77XX_WHITE);
-  drawCentreText("Computer", 130, 5, ST77XX_WHITE);
+  drawCentreText("Check", 60, 5, ST77XX_WHITE);
+  drawCentreText("Oxygen", 130, 5, ST77XX_WHITE);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -1048,8 +1047,8 @@ void setup() {
   // PSRAM frame buffer initialisation
   if (!initFrameBuffers()) {
     display.fillScreen(ST77XX_BLACK);
-    drawCentreText("Frame Buffer", 96, 3, ST77XX_RED);
-    drawCentreText("Alloc Failed", 144, 3, ST77XX_RED);
+    drawCentreText("PSRAM", 96, 3, ST77XX_RED);
+    drawCentreText("Error", 144, 3, ST77XX_RED);
     delay(Message_MS);
     display.fillScreen(ST77XX_BLACK);
   }
@@ -1116,9 +1115,9 @@ void setup() {
               drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
               const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
               drawCalibrationDiagnostics(calibration_ok);
-              delay(Message_MS * 5);
+              delay(Message_MS * 3);
               drawCalibrationScore();
-              delay(Message_MS * 5);
+              delay(Message_MS * 3);
               display.fillScreen(ST77XX_BLACK);
               esp_restart();  // Restart after calibration
             }
