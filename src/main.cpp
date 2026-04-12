@@ -19,7 +19,6 @@
 #include <Preferences.h>
 #include <magnetometer_calibration.h>
 
-
 // Pins
 constexpr uint8_t Boot_Pin = 0;
 constexpr uint8_t Battery_Pin = 1;
@@ -38,7 +37,6 @@ constexpr uint8_t Sensor_SDA_Pin = 18;
 constexpr uint8_t Sys_Pin = 40;
 constexpr uint8_t Power_Pin = 41;
 constexpr uint8_t Buzz_Pin = 42;
-
 
 // Define Objects
 SPIClass spi(FSPI);
@@ -66,14 +64,14 @@ constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surr
 constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 5000;              // Display messages for 5 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
-constexpr uint32_t Fast_Update_MS = 100;           // Heading/tap/button checks: 10 Hz
-constexpr uint32_t Slow_Update_MS = 1000;          // Depth sensor and ADC updates: 1 Hz
-constexpr uint32_t Deco_Update_MS = 10000;         // Decompression model updates: 0.1 Hz
+constexpr uint32_t Button_Update_MS = 100;         // Button checks: 10 Hz
+constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
+constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
 // Compass Constants
 constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
 constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;         // QMC5883P at FS_8G: 3750 LSB/Gauss
-constexpr uint32_t Compass_Calibration_Duration_MS = 120000;  // 120 seconds for compass calibration
+constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Hard_Iron_X_Key = "hi_x";
@@ -85,13 +83,14 @@ constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
 constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
 // Tap Detection Constants
-constexpr float Tap_Threshold_G = 0.4f;                 // Envelope trigger threshold
-constexpr float Tap_Release_Threshold_G = 0.2f;         // Hysteresis release threshold
-constexpr float Tap_Gravity_LPF_Alpha = 0.98f;          // Gravity adaptation
+constexpr uint8_t Tap_Number = 3;                       // Number of taps
+constexpr float Tap_Threshold_G = 0.2f;                 // Envelope trigger threshold
+constexpr float Tap_Release_Threshold_G = 0.1f;         // Hysteresis release threshold
+constexpr float Tap_Gravity_LPF_Alpha = 0.99f;          // Gravity adaptation
 constexpr float Tap_Envelope_Decay_G_Per_MS = 0.0018f;  // Envelope fall speed
-constexpr uint8_t Tap_Burst_Samples = 6;                // Burst-read to catch short impulses
+constexpr uint8_t Tap_Burst_Samples = 20;               // Burst-read to catch short impulses
 constexpr uint16_t Tap_Burst_Spacing_MS = 2;            // 2 ms between burst samples
-constexpr uint32_t Tap_Window_MS = 5000;                // Taps window
+constexpr uint32_t Tap_Window_MS = 2000;                // Taps window
 constexpr uint32_t Tap_Min_Spacing_MS = 200;            // Minimum gap between taps
 
 // Button Constants
@@ -139,11 +138,11 @@ uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
 // Tap detection
-uint8_t pentaTapCount = 0;
-uint64_t pentaTapFirstMS = 0;
-uint64_t pentaTapLastMS = 0;
+uint8_t tapCount = 0;
+uint64_t tapFirstMS = 0;
+uint64_t tapLastMS = 0;
 float Tap_Instant_Signal_G = 0.0f;
-bool pentaTapAboveThresh = false;
+bool tapAboveThresh = false;
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_MS = 0;
@@ -420,30 +419,30 @@ float readTapSignalX(uint64_t nowMS) {
   return envelope;
 }
 
-// Penta-tap
-bool detectpentaTap(uint64_t nowMS) {
+// Tap Detection
+bool detectTap(uint64_t nowMS) {
   const float tapSignal = readTapSignalX(nowMS);
-  if (pentaTapCount > 0 && (nowMS - pentaTapFirstMS) > Tap_Window_MS) {
-    pentaTapCount= 0;
-    pentaTapAboveThresh = false;
+  if (tapCount > 0 && (nowMS - tapFirstMS) > Tap_Window_MS) {
+    tapCount= 0;
+    tapAboveThresh = false;
   }
   bool newTap = false;
   if (tapSignal > Tap_Threshold_G) {
-    if (!pentaTapAboveThresh) {
-      pentaTapAboveThresh = true;
-      if (pentaTapCount == 0 || (nowMS - pentaTapLastMS) >= Tap_Min_Spacing_MS) {
+    if (!tapAboveThresh) {
+      tapAboveThresh = true;
+      if (tapCount == 0 || (nowMS - tapLastMS) >= Tap_Min_Spacing_MS) {
         newTap = true;
       }
     }
   } else if (Tap_Instant_Signal_G < Tap_Release_Threshold_G) {
-    pentaTapAboveThresh = false;
+    tapAboveThresh = false;
   }
   if (newTap) {
-    if (pentaTapCount == 0) pentaTapFirstMS = nowMS;
-    pentaTapCount++;
-    pentaTapLastMS = nowMS;
-    if (pentaTapCount >= 5) {
-      pentaTapCount = 0;
+    if (tapCount == 0) tapFirstMS = nowMS;
+    tapCount++;
+    tapLastMS = nowMS;
+    if (tapCount >= Tap_Number) {
+      tapCount = 0;
       return true;
     }
   }
@@ -489,6 +488,17 @@ uint8_t ambientBacklightLevel(float lux) {
   return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
+// Read Accelerometer
+static void readQmiAxesTransformed(float out_accel[3]) {
+  float qmi_x = 0.0f;
+  float qmi_y = 0.0f;
+  float qmi_z = 0.0f;
+  qmi.getAccelerometer(qmi_x, qmi_y, qmi_z);
+  out_accel[0] = qmi_x;   // Right = QMI_X
+  out_accel[1] = -qmi_y;  // Down = -QMI_Y
+  out_accel[2] = -qmi_z;  // Forward = -QMI_Z
+}
+
 // Read Magnetometer
 static void readQmcAxesTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
@@ -496,22 +506,19 @@ static void readQmcAxesTransformed(float out_mag[3]) {
   const float qmc_x = static_cast<float>(mag_data.raw.x);
   const float qmc_y = static_cast<float>(mag_data.raw.y);
   const float qmc_z = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -qmc_y;  // Right = library X = -QMC_Y
-  out_mag[1] = qmc_x;   // Down = library Y = QMC_X
-  out_mag[2] = qmc_z;   // Forward = library Z = QMC_Z
+  out_mag[0] = -qmc_x;  // Right = -QMC_X
+  out_mag[1] = -qmc_y;  // Down = -QMC_Y
+  out_mag[2] = -qmc_z;  // Forward = -QMC_Z
 }
 
 // Read Compass Heading
 static float readCompassHeading() {
-  // Tilt reading
-  float ax = 0.0f;
-  float ay = 0.0f;
-  float az = 0.0f;
-  qmi.getAccelerometer(ax, ay, az);
+  // Tilt reading in compass library body frame: X = right, Y = down, Z = forward.
+  float accel[3] = {0.0f, 0.0f, 0.0f};
+  readQmiAxesTransformed(accel);
   // Magnetometer reading
   float raw_mag[3] = {0.0f, 0.0f, 0.0f};
   readQmcAxesTransformed(raw_mag);
-  const float accel[3] = {ax, ay, -az};
   // Apply calibration and tilt compensation
   float compensated[3] = {0.0f, 0.0f, 0.0f};
   compassApplyCalibrationAndTiltCompensation(raw_mag, accel, compensated);
@@ -521,7 +528,7 @@ static float readCompassHeading() {
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
   constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
-  constexpr size_t Calibration_Max_Samples = 20000U;
+  constexpr size_t Calibration_Max_Samples = 10000U;
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
   mag_samples_xyz.reserve(3U * Calibration_Max_Samples);
@@ -610,7 +617,7 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
   }
   display.setTextSize(3);
   display.setTextColor(state_colour);
-  display.setCursor(20, 10);
+  display.setCursor(40, 10);
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
@@ -655,7 +662,7 @@ static void drawCalibrationScore() {
   }
   display.setTextSize(3);
   display.setTextColor(score_colour);
-  display.setCursor(20, 10);
+  display.setCursor(40, 10);
   display.print("Score: ");
   display.print(score);
   display.print("%");
@@ -1032,7 +1039,8 @@ void setup() {
       MagFullScaleRange::FS_8G,
       100.0f,
       MagOverSampleRatio::OSR_8,
-      MagDownSampleRatio::DSR_8);
+      MagDownSampleRatio::DSR_8
+    );
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
   if (!loadCompassCalibrationFromNVS()) {
     Compass_Matrices = {};
@@ -1053,7 +1061,7 @@ void setup() {
     display.fillScreen(ST77XX_BLACK);
   }
 
-  // Display update on one core
+  // Display update on core 1
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
@@ -1081,19 +1089,20 @@ void setup() {
       &Display_Task_Handle,
       1);
 
+  // Sensor reading and logic updates on core 0
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
-        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Fast_Update_MS);
-        uint64_t lastFastUpdateMS = 0;
-        uint64_t lastSlowUpdateMS = 0;
+        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Button_Update_MS);
+        uint64_t lastButtonUpdateMS = 0;
+        uint64_t lastDepthUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
           // 10 Hz
-          if ((nowMS - lastFastUpdateMS) >= Fast_Update_MS) {
-            lastFastUpdateMS = nowMS;
+          if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
+            lastButtonUpdateMS = nowMS;
             // Tap detection
-            if (detectpentaTap(nowMS)) {
+            if (detectTap(nowMS)) {
               ripNtear_Mode = !ripNtear_Mode;
               ripNtear(ripNtear_Mode);
               Deco_Last_Update_MS = nowMS - Deco_Update_MS;
@@ -1124,9 +1133,9 @@ void setup() {
             // Compass
             Heading = readCompassHeading();
           }
-          // 1 Hz
-          if ((nowMS - lastSlowUpdateMS) >= Slow_Update_MS) {
-            lastSlowUpdateMS = nowMS;
+          // 2 Hz
+          if ((nowMS - lastDepthUpdateMS) >= Depth_Update_MS) {
+            lastDepthUpdateMS = nowMS;
             // Depth
             float pressureMbar = MBAR_PER_ATM;
             float pressureAtm = 1.0f;
@@ -1164,7 +1173,7 @@ void setup() {
             if (digitalRead(Sys_Pin) == HIGH) {
               digitalWrite(Power_Pin, LOW);
             }
-            // 0.1 Hz: ZHL-16C
+            // 0.2 Hz: ZHL-16C
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
               const float dtMin = static_cast<float>(nowMS - Deco_Last_Update_MS) / 60000.0f;
               Deco_Last_Update_MS = nowMS;
