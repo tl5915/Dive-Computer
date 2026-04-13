@@ -1035,13 +1035,14 @@ void setup() {
 
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_2G,
-                          SensorQMI8658::ACC_ODR_250Hz,
+  qmi.enableSyncSampleMode();
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                          SensorQMI8658::ACC_ODR_125Hz,
                           SensorQMI8658::LPF_MODE_2);
-  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
-                      SensorQMI8658::GYR_ODR_224_2Hz,
+  qmi.enableAccelerometer();             
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_512DPS,
+                      SensorQMI8658::GYR_ODR_112_1Hz,
                       SensorQMI8658::LPF_MODE_2);
-  qmi.enableAccelerometer();
   qmi.enableGyroscope();
 
   // QMC5883P initialisation
@@ -1050,7 +1051,7 @@ void setup() {
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
       MagFullScaleRange::FS_8G,
-      100.0f,
+      200.0f,
       MagOverSampleRatio::OSR_8,
       MagDownSampleRatio::DSR_8
     );
