@@ -70,11 +70,19 @@ constexpr uint32_t Button_Update_MS = 10;          // Button checks and compass:
 constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
 constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
+// IMU Constants
+constexpr float Accel_Offset_X = 0.0f;
+constexpr float Accel_Offset_Y = 0.0f;
+constexpr float Accel_Offset_Z = 0.0f;
+constexpr float Gyro_Offset_X = -2.2240f;
+constexpr float Gyro_Offset_Y = 0.2832f;
+constexpr float Gyro_Offset_Z = -0.0727f;
+
 // Compass Constants
-constexpr float Compass_Offset = 0.0;                         // Compass offset degrees
-constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
-constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;         // QMC5883P at FS_8G: 3750 LSB/Gauss
-constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
+constexpr float Compass_Offset = 0.0;                        // Compass offset degrees
+constexpr float Reference_Field_Gauss = 0.49f;               // UK average magnetic field strength
+constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;        // QMC5883P at FS_8G: 3750 LSB/Gauss
+constexpr uint32_t Compass_Calibration_Duration_MS = 30000;  // 30 seconds for compass calibration
 constexpr const char *Compass_NVS_Namespace = "compass";
 constexpr const char *Calibration_Valid_Key = "cal_valid";
 constexpr const char *Hard_Iron_X_Key = "hi_x";
@@ -87,11 +95,11 @@ constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
 // Default Compass Calibration Matrix
 constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
-  .hard_iron = {0.0f, 0.0f, 0.0f},
+  .hard_iron = {879.247262, -296.961766, -242.690155},
   .soft_iron = {
-    1.0f, 0.0f, 0.0f,
-    0.0f, 1.0f, 0.0f,
-    0.0f, 0.0f, 1.0f
+    0.000255f, -0.000002f, 0.000005f,
+    -0.000002f, 0.000263f, -0.000001f,
+    0.000005f, -0.000001f, 0.000263f
   },
   .reference_field_gauss = Reference_Field_Gauss,
   .lsb_per_gauss = Magnetometer_Lsb_Per_Gauss,
@@ -474,6 +482,9 @@ static void readQmiAxesTransformed(float out_accel[3]) {
   float qmi_y = 0.0f;
   float qmi_z = 0.0f;
   qmi.getAccelerometer(qmi_x, qmi_y, qmi_z);
+  qmi_x -= Accel_Offset_X;
+  qmi_y -= Accel_Offset_Y;
+  qmi_z -= Accel_Offset_Z;
   out_accel[0] = qmi_x;   // Right = QMI_X
   out_accel[1] = -qmi_y;  // Down = -QMI_Y
   out_accel[2] = -qmi_z;  // Forward = -QMI_Z
@@ -483,9 +494,12 @@ static void readQmiAxesTransformed(float out_accel[3]) {
 static void readQmiGyroTransformed(float out_gyro[3]) {
   float gx = 0.0f, gy = 0.0f, gz = 0.0f;
   qmi.getGyroscope(gx, gy, gz);
-  out_gyro[0] = gx;   // X = right
-  out_gyro[1] = -gy;  // Y = down
-  out_gyro[2] = -gz;  // Z = forward
+  gx -= Gyro_Offset_X;
+  gy -= Gyro_Offset_Y;
+  gz -= Gyro_Offset_Z;
+  out_gyro[0] = gx;   // Right = QMI_X
+  out_gyro[1] = -gy;  // Down = -QMI_Y
+  out_gyro[2] = -gz;  // Forward = -QMI_Z
 }
 
 // Read Magnetometer
@@ -513,7 +527,7 @@ static float readCompassHeading() {
   float cal_mag_body[3] = {0.0f, 0.0f, 0.0f};
   readQmcAxesTransformed(raw_mag_body);
   compassApplyCalibration(raw_mag_body, cal_mag_body);
-  // Map body frame to Madgwick frame, yaw is heading down
+  // Map body frame to AHRS frame, yaw is heading down
   const float ax = accel_body[2];
   const float ay = accel_body[0];
   const float az = accel_body[1];
@@ -533,7 +547,7 @@ static float readCompassHeading() {
 
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
-  constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
+  constexpr uint32_t Calibration_Sample_Period_MS = 5;  // ODR 200 Hz
   constexpr size_t Calibration_Max_Samples = 10000U;
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
@@ -1065,11 +1079,11 @@ void setup() {
   qmi.enableSyncSampleMode();
   qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
                           SensorQMI8658::ACC_ODR_125Hz,
-                          SensorQMI8658::LPF_MODE_2);
-  qmi.enableAccelerometer();             
-  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_512DPS,
+                          SensorQMI8658::LPF_MODE_2);            
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
                       SensorQMI8658::GYR_ODR_112_1Hz,
                       SensorQMI8658::LPF_MODE_2);
+  qmi.enableAccelerometer();  
   qmi.enableGyroscope();
 
   // QMC5883P initialisation

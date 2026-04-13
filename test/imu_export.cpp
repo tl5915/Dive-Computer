@@ -10,23 +10,29 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SensorQMC5883P.hpp>
+#include <SensorQMI8658.hpp>
 // Data Processing
 #include <vector>
 #include <WiFi.h>
 #include <WebServer.h>
 
-// Magnetometer data collection
-struct MagDataPoint {
+// IMU data collection
+struct ImuDataPoint {
   float x, y, z;
 };
 
-std::vector<MagDataPoint> mag_data_collection;
-String collected_data_text;
+std::vector<ImuDataPoint> mag_data_collection;
+std::vector<ImuDataPoint> accel_data_collection;
+std::vector<ImuDataPoint> gyro_data_collection;
+String mag_data_text;
+String accel_data_text;
+String gyro_data_text;
 bool collection_in_progress = false;
 bool collection_complete = false;
 uint32_t collection_start_ms = 0;
-constexpr uint32_t COLLECTION_DURATION_MS = 120000;  // 120 seconds
+constexpr uint32_t COLLECTION_DURATION_MS = 30000;  // 30 seconds
 constexpr uint32_t COLLECTION_SAMPLE_PERIOD_MS = 10;  // 100 Hz
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 WebServer server(80);
 
 // Pins
@@ -44,7 +50,7 @@ constexpr uint8_t Sensor_VCC_Pin = 3;
 constexpr uint8_t Sensor_GND_Pin = 16;
 constexpr uint8_t Sensor_SCL_Pin = 17;
 constexpr uint8_t Sensor_SDA_Pin = 18;
-constexpr uint8_t Sys_Pin = 40;
+constexpr uint8_t Button_Pin = 40;
 constexpr uint8_t Power_Pin = 41;
 constexpr uint8_t Buzz_Pin = 42;
 
@@ -52,10 +58,12 @@ constexpr uint8_t Buzz_Pin = 42;
 // Define Objects
 SPIClass spi(FSPI);
 SensorQMC5883P qmc;
+SensorQMI8658 qmi;
 Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
 
 // I2C Addresses
 constexpr uint8_t QMC5883P_I2C_Address = 0x2C;
+constexpr uint8_t QMI8658_I2C_Address = 0x6B;
 
 // LCD Constants
 constexpr uint16_t LCD_Width = 260;
@@ -76,11 +84,14 @@ uint16_t Render_Height = 0;
 bool Frame_Have_Previous = false;
 
 // IMU
-float mx = 0.0f;
-float my = 0.0f;
-float mz = 0.0f;
 uint32_t samples_collected = 0;
 uint32_t boot_time_ms = 0;
+float live_accel_x = 0.0f;
+float live_accel_y = 0.0f;
+float live_accel_z = 0.0f;
+uint8_t button_last_reading = HIGH;
+uint8_t button_stable_state = HIGH;
+uint32_t button_last_change_ms = 0;
 
 // Read Magnetometer
 static void readQmcAxesTransformed(float out_mag[3]) {
@@ -92,6 +103,24 @@ static void readQmcAxesTransformed(float out_mag[3]) {
   out_mag[0] = -qmc_x;  // Right = -QMC_X
   out_mag[1] = -qmc_y;  // Down = -QMC_Y
   out_mag[2] = -qmc_z;  // Forward = -QMC_Z
+}
+
+// Read Accelerometer
+static void readQmiAxesTransformed(float out_accel[3]) {
+  float qmi_x = 0.0f, qmi_y = 0.0f, qmi_z = 0.0f;
+  qmi.getAccelerometer(qmi_x, qmi_y, qmi_z);
+  out_accel[0] = qmi_x;   // Right = QMI_X
+  out_accel[1] = -qmi_y;  // Down = -QMI_Y
+  out_accel[2] = -qmi_z;  // Forward = -QMI_Z
+}
+
+// Read Gyroscope
+static void readQmiGyroTransformed(float out_gyro[3]) {
+  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+  qmi.getGyroscope(gx, gy, gz);
+  out_gyro[0] = gx;   // Right = GX
+  out_gyro[1] = -gy;  // Down = -GY
+  out_gyro[2] = -gz;  // Forward = -GZ
 }
 
 // Frame Buffer Management
@@ -177,64 +206,61 @@ void updateDisplay(Adafruit_GFX &target) {
   target.fillScreen(ST77XX_BLACK);
   target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);  
   uint32_t now_ms = millis();
-  uint32_t time_since_boot = now_ms - boot_time_ms;
-  if (time_since_boot < 10000) {
-    // Countdown
-    uint32_t count_down = (10000 - time_since_boot) / 1000;
-    target.setTextSize(10);
-    target.setCursor(110, 90);
-    target.print(count_down);
-  } else if (collection_in_progress) {
+  if (collection_in_progress) {
     // Collecting
     target.setTextSize(4);
-    target.setCursor(50, 50);
+    target.setCursor(10, 50);
     target.print("Collecting");
     uint32_t elapsed = now_ms - collection_start_ms;
     uint32_t remaining_sec = (COLLECTION_DURATION_MS - elapsed) / 1000;
     target.setTextSize(3);
-    target.setCursor(50, 150);
+    target.setCursor(10, 150);
     target.print(remaining_sec);
-    target.setCursor(50, 200);
-    target.print("Count: ");
+    target.setCursor(10, 200);
+    target.print("Count:");
     target.print(samples_collected);
   } else if (collection_complete) {
     // Completed
     target.setTextSize(4);
-    target.setCursor(50, 50);
+    target.setCursor(10, 20);
     target.print("Done!");
-    target.setTextSize(3);
-    target.setCursor(20, 150);
+    target.setTextSize(2);
+    target.setCursor(10, 80);
     target.print("WiFi: ESP32");
-    target.setCursor(20, 200);
+    target.setCursor(10, 105);
     target.print("pwd: 12345678");
+    target.setCursor(10, 150);
+    target.print("/m  magnetometer");
+    target.setCursor(10, 170);
+    target.print("/a  accelerometer");
+    target.setCursor(10, 190);
+    target.print("/g  gyroscope");
+    target.setCursor(10, 220);
+    target.print("192.168.4.1");
+  } else {
+    // Idle: show live accelerometer values
+    target.setTextSize(4);
+    target.setCursor(10, 40);
+    target.print("X: ");
+    target.print(live_accel_x, 4);
+    target.setCursor(10, 100);
+    target.print("Y: ");
+    target.print(live_accel_y, 4);
+    target.setCursor(10, 160);
+    target.print("Z: ");
+    target.print(live_accel_z, 4);
   }
 }
 
 // Web Server
-void handleStatus() {
-  String status = "Magnetometer Raw Data Export\n\n";
-  if (collection_complete) {
-    status += "Status: COMPLETE\n";
-    status += "Samples: ";
-    status += String(samples_collected);
-    status += "\n\n";
-    status += "Download: GET /download\n";
-    status += "View: GET /view\n";
-  } else if (collection_in_progress) {
-    status += "Status: Collecting in progress...\n";
-  } else {
-    status += "Status: Waiting to start...\n";
-  }
-  server.send(200, "text/plain", status);
+void handleMagView() {
+  server.send(200, "text/plain", mag_data_text);
 }
-
-void handleDataDownload() {
-  server.sendHeader("Content-Disposition", "attachment; filename=\"magnetometer_raw.txt\"");
-  server.send(200, "text/plain", collected_data_text);
+void handleAccelView() {
+  server.send(200, "text/plain", accel_data_text);
 }
-
-void handleDataView() {
-  server.send(200, "text/plain", collected_data_text);
+void handleGyroView() {
+  server.send(200, "text/plain", gyro_data_text);
 }
 
 void setup() {
@@ -242,8 +268,7 @@ void setup() {
   pinMode(Power_Pin, OUTPUT);
   digitalWrite(Power_Pin, HIGH);
   delay(10);
-  pinMode(Sys_Pin, INPUT);
-  
+  pinMode(Button_Pin, INPUT);
   // Boot time
   boot_time_ms = millis();
   
@@ -272,6 +297,18 @@ void setup() {
   Wire.setClock(400000);
   delay(10);
 
+  // QMI8658 initialisation
+  qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
+  qmi.enableSyncSampleMode();
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                          SensorQMI8658::ACC_ODR_125Hz,
+                          SensorQMI8658::LPF_MODE_2);
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
+                      SensorQMI8658::GYR_ODR_112_1Hz,
+                      SensorQMI8658::LPF_MODE_2);
+  qmi.enableAccelerometer();
+  qmi.enableGyroscope();
+
   // QMC5883P initialisation
   pinMode(Boot_Pin, INPUT);
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
@@ -291,9 +328,9 @@ void setup() {
   WiFi.softAP("ESP32", "12345678");
   
   // Setup web server
-  server.on("/", handleStatus);
-  server.on("/download", handleDataDownload);
-  server.on("/view", handleDataView);
+  server.on("/m", handleMagView);
+  server.on("/a", handleAccelView);
+  server.on("/g", handleGyroView);
   server.begin();
 
   // Display on core 1
@@ -332,23 +369,60 @@ void setup() {
         uint64_t lastCollectionSampleMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          uint32_t time_since_boot = nowMS - boot_time_ms;
-          // Check time
-          if (!collection_in_progress && !collection_complete && time_since_boot >= 10000) {
-            collection_in_progress = true;
-            collection_start_ms = nowMS;
-            mag_data_collection.clear();
-            samples_collected = 0;
-            lastCollectionSampleMS = nowMS;
+          // Update ccelerometer
+          if (!collection_in_progress && !collection_complete) {
+            float accel[3] = {0.0f, 0.0f, 0.0f};
+            readQmiAxesTransformed(accel);
+            live_accel_x = accel[0];
+            live_accel_y = accel[1];
+            live_accel_z = accel[2];
+          }
+          // Start collection
+          const uint8_t button_reading = static_cast<uint8_t>(digitalRead(Button_Pin));
+          if (button_reading != button_last_reading) {
+            button_last_change_ms = static_cast<uint32_t>(nowMS);
+            button_last_reading = button_reading;
+          }
+          if ((nowMS - button_last_change_ms) >= BUTTON_DEBOUNCE_MS) {
+            if (button_reading != button_stable_state) {
+              button_stable_state = button_reading;
+              if (button_stable_state == LOW && !collection_in_progress && !collection_complete) {
+                collection_in_progress = true;
+                collection_start_ms = static_cast<uint32_t>(nowMS);
+                mag_data_collection.clear();
+                accel_data_collection.clear();
+                gyro_data_collection.clear();
+                samples_collected = 0;
+                lastCollectionSampleMS = nowMS;
+              }
+            }
+          }
+          if (!collection_in_progress || collection_complete) {
+            if (collection_complete) {
+              server.handleClient();
+            }
+            if (fastPeriodTicks > 0) {
+              vTaskDelayUntil(&lastWakeTick, fastPeriodTicks);
+            } else {
+              taskYIELD();
+            }
+            continue;
           }
           // Handle collection
           if (collection_in_progress) {
-            uint32_t elapsed = nowMS - collection_start_ms;
+            collection_in_progress = true;
+            uint32_t elapsed = static_cast<uint32_t>(nowMS) - collection_start_ms;
             // Collect samples
             if ((nowMS - lastCollectionSampleMS) >= COLLECTION_SAMPLE_PERIOD_MS) {
               float mag[3] = {0.0f, 0.0f, 0.0f};
+              float accel[3] = {0.0f, 0.0f, 0.0f};
+              float gyro[3] = {0.0f, 0.0f, 0.0f};
               readQmcAxesTransformed(mag);
+              readQmiAxesTransformed(accel);
+              readQmiGyroTransformed(gyro);
               mag_data_collection.push_back({mag[0], mag[1], mag[2]});
+              accel_data_collection.push_back({accel[0], accel[1], accel[2]});
+              gyro_data_collection.push_back({gyro[0], gyro[1], gyro[2]});
               samples_collected++;
               lastCollectionSampleMS = nowMS;
             }
@@ -356,15 +430,35 @@ void setup() {
             if (elapsed >= COLLECTION_DURATION_MS) {
               collection_in_progress = false;
               collection_complete = true;
-              // Format data
-              collected_data_text = "";
+              // Format magnetometer data
+              mag_data_text = "";
               for (const auto& point : mag_data_collection) {
-                collected_data_text += String(point.x, 2);
-                collected_data_text += "\t";
-                collected_data_text += String(point.y, 2);
-                collected_data_text += "\t";
-                collected_data_text += String(point.z, 2);
-                collected_data_text += "\n";
+                mag_data_text += String(point.x, 2);
+                mag_data_text += "\t";
+                mag_data_text += String(point.y, 2);
+                mag_data_text += "\t";
+                mag_data_text += String(point.z, 2);
+                mag_data_text += "\n";
+              }
+              // Format accelerometer data
+              accel_data_text = "";
+              for (const auto& point : accel_data_collection) {
+                accel_data_text += String(point.x, 4);
+                accel_data_text += "\t";
+                accel_data_text += String(point.y, 4);
+                accel_data_text += "\t";
+                accel_data_text += String(point.z, 4);
+                accel_data_text += "\n";
+              }
+              // Format gyroscope data
+              gyro_data_text = "";
+              for (const auto& point : gyro_data_collection) {
+                gyro_data_text += String(point.x, 4);
+                gyro_data_text += "\t";
+                gyro_data_text += String(point.y, 4);
+                gyro_data_text += "\t";
+                gyro_data_text += String(point.z, 4);
+                gyro_data_text += "\n";
               }
             }
           }
@@ -372,7 +466,6 @@ void setup() {
           if (collection_complete) {
             server.handleClient();
           }
-          
           if (fastPeriodTicks > 0) {
             vTaskDelayUntil(&lastWakeTick, fastPeriodTicks);
           } else {
