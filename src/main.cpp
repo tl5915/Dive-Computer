@@ -85,6 +85,20 @@ constexpr const char *Reference_Mag_Gauss_Key = "ref_gauss";
 constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
 constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
+// Default Compass Calibration Matrix
+constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
+  .hard_iron = {0.0f, 0.0f, 0.0f},
+  .soft_iron = {
+    1.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 1.0f
+  },
+  .reference_field_gauss = Reference_Field_Gauss,
+  .lsb_per_gauss = Magnetometer_Lsb_Per_Gauss,
+  .fitted_field_lsb = Reference_Field_Gauss * Magnetometer_Lsb_Per_Gauss,
+  .is_valid = true
+};
+
 // Button Constants
 constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
 constexpr uint32_t Button_Short_MS = 799;         // Short press threshold 799 ms
@@ -565,7 +579,20 @@ static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz)
     Last_Calibration_Fail_Reason = CalibrationFailReason::FitFailed;
     return false;
   }
-  Compass_Matrices = fitted;
+  if (fit_method == CompassCalibrationFitMethod::Ellipsoid) {
+    Compass_Matrices = fitted;
+  } else if (fit_method == CompassCalibrationFitMethod::MinMax) {
+    Compass_Matrices.hard_iron[0] = fitted.hard_iron[0];
+    Compass_Matrices.hard_iron[1] = fitted.hard_iron[1];
+    Compass_Matrices.hard_iron[2] = fitted.hard_iron[2];
+    for (int i = 0; i < 9; i++) {
+      Compass_Matrices.soft_iron[i] = Default_Compass_Matrices.soft_iron[i];
+    }
+  Compass_Matrices.reference_field_gauss = fitted.reference_field_gauss;
+  Compass_Matrices.lsb_per_gauss = fitted.lsb_per_gauss;
+  Compass_Matrices.fitted_field_lsb = fitted.fitted_field_lsb;
+  Compass_Matrices.is_valid = fitted.is_valid;
+  }
   if (!compassSetCalibrationMatrices(&Compass_Matrices)) {
     Last_Calibration_Method = CompassCalibrationMethod::Error;
     Last_Calibration_Fail_Reason = CalibrationFailReason::ApplyFailed;

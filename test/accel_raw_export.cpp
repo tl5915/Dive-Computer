@@ -12,7 +12,22 @@
 #include <SensorQMC5883P.hpp>
 // Data Processing
 #include <vector>
+#include <WiFi.h>
+#include <WebServer.h>
 
+// Magnetometer data collection
+struct MagDataPoint {
+  float x, y, z;
+};
+
+std::vector<MagDataPoint> mag_data_collection;
+String collected_data_text;
+bool collection_in_progress = false;
+bool collection_complete = false;
+uint32_t collection_start_ms = 0;
+constexpr uint32_t COLLECTION_DURATION_MS = 120000;  // 120 seconds
+constexpr uint32_t COLLECTION_SAMPLE_PERIOD_MS = 10;  // 100 Hz
+WebServer server(80);
 
 // Pins
 constexpr uint8_t Boot_Pin = 0;
@@ -45,9 +60,9 @@ constexpr uint8_t QMC5883P_I2C_Address = 0x2C;
 // LCD Constants
 constexpr uint16_t LCD_Width = 260;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
-constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
-constexpr uint32_t Fast_Update_MS = 10;            // Heading/tap/button checks: 100 Hz
+constexpr uint8_t Backlight_High = 255;
+constexpr uint32_t Display_Update_MS = 50;
+constexpr uint32_t Fast_Update_MS = 100;
 
 // RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
@@ -64,6 +79,20 @@ bool Frame_Have_Previous = false;
 float mx = 0.0f;
 float my = 0.0f;
 float mz = 0.0f;
+uint32_t samples_collected = 0;
+uint32_t boot_time_ms = 0;
+
+// Read Magnetometer
+static void readQmcAxesTransformed(float out_mag[3]) {
+  MagnetometerData mag_data = {};
+  qmc.readData(mag_data);
+  const float qmc_x = static_cast<float>(mag_data.raw.x);
+  const float qmc_y = static_cast<float>(mag_data.raw.y);
+  const float qmc_z = static_cast<float>(mag_data.raw.z);
+  out_mag[0] = -qmc_x;  // Right = -QMC_X
+  out_mag[1] = -qmc_y;  // Down = -QMC_Y
+  out_mag[2] = -qmc_z;  // Forward = -QMC_Z
+}
 
 // Frame Buffer Management
 static bool initFrameBuffers() {
@@ -143,22 +172,70 @@ static void flushDirtyRectFromPSRAM() {
   Frame_Have_Previous = true;
 }
 
-// Main Display
+// Display
 void updateDisplay(Adafruit_GFX &target) {
   target.fillScreen(ST77XX_BLACK);
-  target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-  target.setTextSize(2);
-  target.setCursor(20, 50);
-  target.print("Mag X:");
-  target.print(mx, 3);
-  target.setCursor(20, 100);
-  target.print("Mag Y:");
-  target.print(my, 3);
-  target.setCursor(20, 150);
-  target.print("Mag Z:");
-  target.print(mz, 3);
+  target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);  
+  uint32_t now_ms = millis();
+  uint32_t time_since_boot = now_ms - boot_time_ms;
+  if (time_since_boot < 10000) {
+    // Countdown
+    uint32_t count_down = (10000 - time_since_boot) / 1000;
+    target.setTextSize(10);
+    target.setCursor(110, 90);
+    target.print(count_down);
+  } else if (collection_in_progress) {
+    // Collecting
+    target.setTextSize(4);
+    target.setCursor(50, 50);
+    target.print("Collecting");
+    uint32_t elapsed = now_ms - collection_start_ms;
+    uint32_t remaining_sec = (COLLECTION_DURATION_MS - elapsed) / 1000;
+    target.setTextSize(3);
+    target.setCursor(50, 150);
+    target.print(remaining_sec);
+    target.setCursor(50, 200);
+    target.print("Count: ");
+    target.print(samples_collected);
+  } else if (collection_complete) {
+    // Completed
+    target.setTextSize(4);
+    target.setCursor(50, 50);
+    target.print("Done!");
+    target.setTextSize(3);
+    target.setCursor(20, 150);
+    target.print("WiFi: ESP32");
+    target.setCursor(20, 200);
+    target.print("pwd: 12345678");
+  }
 }
 
+// Web Server
+void handleStatus() {
+  String status = "Magnetometer Raw Data Export\n\n";
+  if (collection_complete) {
+    status += "Status: COMPLETE\n";
+    status += "Samples: ";
+    status += String(samples_collected);
+    status += "\n\n";
+    status += "Download: GET /download\n";
+    status += "View: GET /view\n";
+  } else if (collection_in_progress) {
+    status += "Status: Collecting in progress...\n";
+  } else {
+    status += "Status: Waiting to start...\n";
+  }
+  server.send(200, "text/plain", status);
+}
+
+void handleDataDownload() {
+  server.sendHeader("Content-Disposition", "attachment; filename=\"magnetometer_raw.txt\"");
+  server.send(200, "text/plain", collected_data_text);
+}
+
+void handleDataView() {
+  server.send(200, "text/plain", collected_data_text);
+}
 
 void setup() {
   // Power on
@@ -166,6 +243,10 @@ void setup() {
   digitalWrite(Power_Pin, HIGH);
   delay(10);
   pinMode(Sys_Pin, INPUT);
+  
+  // Boot time
+  boot_time_ms = millis();
+  
   // Power conservation
   pinMode(Buzz_Pin, OUTPUT);
   digitalWrite(Buzz_Pin, LOW);
@@ -204,8 +285,18 @@ void setup() {
 
   // PSRAM frame buffer initialisation
   initFrameBuffers();
+  
+  // Initialize WiFi AP mode
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("ESP32", "12345678");
+  
+  // Setup web server
+  server.on("/", handleStatus);
+  server.on("/download", handleDataDownload);
+  server.on("/view", handleDataView);
+  server.begin();
 
-  // Display update on one core
+  // Display on core 1
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
@@ -233,24 +324,55 @@ void setup() {
       &Display_Task_Handle,
       1);
 
+  // Collect data on core 0
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
         const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Fast_Update_MS);
-        uint64_t lastFastUpdateMS = 0;
-        uint64_t lastSlowUpdateMS = 0;
+        uint64_t lastCollectionSampleMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          // 100 Hz
-          if ((nowMS - lastSlowUpdateMS) >= Fast_Update_MS) {
-            lastSlowUpdateMS = nowMS;
-            // Magnetometer
-            MagnetometerData mag_data = {};
-            qmc.readData(mag_data);
-            mx = static_cast<float>(mag_data.raw.x);
-            my = static_cast<float>(mag_data.raw.y);
-            mz = static_cast<float>(mag_data.raw.z);
+          uint32_t time_since_boot = nowMS - boot_time_ms;
+          // Check time
+          if (!collection_in_progress && !collection_complete && time_since_boot >= 10000) {
+            collection_in_progress = true;
+            collection_start_ms = nowMS;
+            mag_data_collection.clear();
+            samples_collected = 0;
+            lastCollectionSampleMS = nowMS;
           }
+          // Handle collection
+          if (collection_in_progress) {
+            uint32_t elapsed = nowMS - collection_start_ms;
+            // Collect samples
+            if ((nowMS - lastCollectionSampleMS) >= COLLECTION_SAMPLE_PERIOD_MS) {
+              float mag[3] = {0.0f, 0.0f, 0.0f};
+              readQmcAxesTransformed(mag);
+              mag_data_collection.push_back({mag[0], mag[1], mag[2]});
+              samples_collected++;
+              lastCollectionSampleMS = nowMS;
+            }
+            // Check if collection is done
+            if (elapsed >= COLLECTION_DURATION_MS) {
+              collection_in_progress = false;
+              collection_complete = true;
+              // Format data
+              collected_data_text = "";
+              for (const auto& point : mag_data_collection) {
+                collected_data_text += String(point.x, 2);
+                collected_data_text += "\t";
+                collected_data_text += String(point.y, 2);
+                collected_data_text += "\t";
+                collected_data_text += String(point.z, 2);
+                collected_data_text += "\n";
+              }
+            }
+          }
+          // Handle web server
+          if (collection_complete) {
+            server.handleClient();
+          }
+          
           if (fastPeriodTicks > 0) {
             vTaskDelayUntil(&lastWakeTick, fastPeriodTicks);
           } else {
