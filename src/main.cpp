@@ -14,9 +14,10 @@
 #include <SensorQMI8658.hpp>
 #include <SensorQMC5883P.hpp>
 // Data Processing
+#include <Preferences.h>
 #include <vector>
 #include <ZHL16C.h>
-#include <Preferences.h>
+#include <Adafruit_AHRS.h>
 #include <magnetometer_calibration.h>
 
 // Pins
@@ -34,19 +35,20 @@ constexpr uint8_t Sensor_VCC_Pin = 3;
 constexpr uint8_t Sensor_GND_Pin = 16;
 constexpr uint8_t Sensor_SCL_Pin = 17;
 constexpr uint8_t Sensor_SDA_Pin = 18;
-constexpr uint8_t Sys_Pin = 40;
+constexpr uint8_t Button_Pin = 40;
 constexpr uint8_t Power_Pin = 41;
 constexpr uint8_t Buzz_Pin = 42;
 
 // Define Objects
 SPIClass spi(FSPI);
-TwoWire sensorWire(1);
+Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
 Preferences prefs;
+TwoWire sensorWire(1);
 MS5837 sensor;
 BH1750 lightMeter;
 SensorQMI8658 qmi;
 SensorQMC5883P qmc;
-Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
+Adafruit_Madgwick ahrs;
 
 // I2C Addresses
 constexpr uint8_t QMI8658_I2C_Address = 0x6B;
@@ -64,11 +66,12 @@ constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surr
 constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 5000;              // Display messages for 5 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
-constexpr uint32_t Button_Update_MS = 100;         // Button checks: 10 Hz
+constexpr uint32_t Button_Update_MS = 10;          // Button checks and compass: 100 Hz
 constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
 constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
 // Compass Constants
+constexpr float Compass_Offset = 0.0;                         // Compass offset degrees
 constexpr float Reference_Field_Gauss = 0.49f;                // UK average magnetic field strength
 constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;         // QMC5883P at FS_8G: 3750 LSB/Gauss
 constexpr uint32_t Compass_Calibration_Duration_MS = 60000;   // 60 seconds for compass calibration
@@ -82,19 +85,13 @@ constexpr const char *Reference_Mag_Gauss_Key = "ref_gauss";
 constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
 constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
-// Tap Detection Constants
-constexpr uint8_t Tap_Number = 3;                       // Number of taps
-constexpr float Tap_Threshold_G = 0.2f;                 // Envelope trigger threshold
-constexpr float Tap_Release_Threshold_G = 0.1f;         // Hysteresis release threshold
-constexpr float Tap_Gravity_LPF_Alpha = 0.99f;          // Gravity adaptation
-constexpr float Tap_Envelope_Decay_G_Per_MS = 0.0018f;  // Envelope fall speed
-constexpr uint8_t Tap_Burst_Samples = 20;               // Burst-read to catch short impulses
-constexpr uint16_t Tap_Burst_Spacing_MS = 2;            // 2 ms between burst samples
-constexpr uint32_t Tap_Window_MS = 2000;                // Taps window
-constexpr uint32_t Tap_Min_Spacing_MS = 200;            // Minimum gap between taps
-
 // Button Constants
 constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
+constexpr uint32_t Button_Short_MS = 799;         // Short press threshold 799 ms
+constexpr uint32_t Button_Long_MS = 800;          // Long press threshold 800 ms
+constexpr uint32_t Button_On_MS = 1000;           // Hold for 1 second to power on
+constexpr uint32_t USB_On_MS = 2000;              // Assume USB power after 2 seconds
+constexpr uint32_t Button_Off_MS = 3000;          // Hold for 3 seconds to power off
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay 10 seconds before calibration
 
 // Depth Sensor Constants
@@ -104,8 +101,8 @@ constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
 constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
 // ZHL-16C Constants
-constexpr u_int8_t GF_Low = 60;
-constexpr u_int8_t GF_High = 85;
+constexpr uint8_t GF_Low = 60;
+constexpr uint8_t GF_High = 85;
 constexpr float Setpoint = 1.2f;
 
 // RTOS
@@ -118,8 +115,10 @@ size_t Frame_Buffer_Bytes = 0;
 uint16_t Render_Width = 0;
 uint16_t Render_Height = 0;
 bool Frame_Have_Previous = false;
+
 // Modes
 bool ripNtear_Mode = false;
+
 // Dive metrics
 bool Dive_Timer_Started = false;
 bool sensorAvailable = false;
@@ -128,27 +127,32 @@ float Heading = 0.0f;
 int Minutes = 0;
 int Seconds = 0;
 uint64_t Timer_Start_MS = 0;
+
 // Battery
 float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
-// Calibration button
+
+// Calibration button (boot button)
+uint8_t Boot_Last_Reading = HIGH;
+uint8_t Boot_Stable_State = HIGH;
+uint64_t Boot_Last_Change_MS = 0;
+
+// User button
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
-// Tap detection
-uint8_t tapCount = 0;
-uint64_t tapFirstMS = 0;
-uint64_t tapLastMS = 0;
-float Tap_Instant_Signal_G = 0.0f;
-bool tapAboveThresh = false;
+uint64_t Button_Press_Start_MS = 0;
+bool Button_Long_Event_Fired = false;
+bool Button_Power_Off_Event_Fired = false;
+
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_MS = 0;
+
 // Compass calibration
 CompassCalibrationMatrices Compass_Matrices = {};
-// Calibration method
 enum class CompassCalibrationMethod : uint8_t {
   None = 0,
   Ellipsoid = 1,
@@ -195,6 +199,7 @@ static const char* calibrationFailReasonText(CalibrationFailReason reason) {
       return "None";
   }
 }
+
 // Compass labels
 struct CompassLabel {
   int degrees;
@@ -211,6 +216,7 @@ const CompassLabel Compass_Labels[] = {
     {270, "W",  3},
     {315, "NW", 2},
   };
+
 // Battery Percentage Lookup Table
 constexpr float Voltage_Table[] = {
     3.27f, 3.61f, 3.69f, 3.71f, 3.73f, 3.75f, 3.77f, 3.79f, 3.80f, 3.82f, 3.84f,
@@ -220,6 +226,50 @@ constexpr uint8_t Percentage_Table[] = {
     55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
+// Button Events
+enum class PressButtonEvent : uint8_t {
+  None = 0,
+  ShortPress,
+  LongPress,
+  PowerOffHold,
+};
+
+
+// Button State
+PressButtonEvent checkButton(uint64_t nowMS) {
+  const uint8_t reading = static_cast<uint8_t>(digitalRead(Button_Pin));
+  if (reading != Button_Last_Reading) {
+    Button_Last_Change_MS = nowMS;
+    Button_Last_Reading = reading;
+  }
+  PressButtonEvent event = PressButtonEvent::None;
+  if ((nowMS - Button_Last_Change_MS) >= Button_Debounce_MS) {
+    if (reading != Button_Stable_State) {
+      Button_Stable_State = reading;
+      if (Button_Stable_State == LOW) {
+        Button_Press_Start_MS = nowMS;
+        Button_Long_Event_Fired = false;
+        Button_Power_Off_Event_Fired = false;
+      } else {
+        const uint64_t heldMS = nowMS - Button_Press_Start_MS;
+        if (!Button_Long_Event_Fired && heldMS <= Button_Short_MS) {
+          event = PressButtonEvent::ShortPress;
+        }
+      }
+    }
+    if (Button_Stable_State == LOW) {
+      const uint64_t heldMS = nowMS - Button_Press_Start_MS;
+      if (!Button_Power_Off_Event_Fired && heldMS >= Button_Off_MS) {
+        Button_Power_Off_Event_Fired = true;
+        event = PressButtonEvent::PowerOffHold;
+      } else if (!Button_Long_Event_Fired && heldMS >= Button_Long_MS) {
+        Button_Long_Event_Fired = true;
+        event = PressButtonEvent::LongPress;
+      }
+    }
+  }
+  return event;
+}
 
 // Frame Buffer Management
 static bool initFrameBuffers() {
@@ -350,100 +400,16 @@ static void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matric
 // Compass Calibration Button
 bool calibrationButtonPressed(uint64_t nowMS) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(Boot_Pin));
-  if (reading != Button_Last_Reading) {
-    Button_Last_Change_MS = nowMS;
-    Button_Last_Reading = reading;
+  if (reading != Boot_Last_Reading) {
+    Boot_Last_Change_MS = nowMS;
+    Boot_Last_Reading = reading;
   }
-  if ((nowMS - Button_Last_Change_MS) >= Button_Debounce_MS) {
-    if (reading != Button_Stable_State) {
-      Button_Stable_State = reading;
-      if (Button_Stable_State == LOW) {
+  if ((nowMS - Boot_Last_Change_MS) >= Button_Debounce_MS) {
+    if (reading != Boot_Stable_State) {
+      Boot_Stable_State = reading;
+      if (Boot_Stable_State == LOW) {
         return true;
       }
-    }
-  }
-  return false;
-}
-
-// Read X-axis tap envelope
-float readTapSignalX(uint64_t nowMS) {
-  static bool gravityInitialised = false;
-  static float gravityX = 0.0f;
-  static float envelope = 0.0f;
-  static uint64_t lastNowMS = 0;
-  static bool sampledForCurrentNow = false;
-  static uint64_t sampledNowMS = 0;
-  if (sampledForCurrentNow && sampledNowMS == nowMS) {
-    return envelope;
-  }
-  float peakSignal = 0.0f;
-  float lastSignal = 0.0f;
-  for (uint8_t sample = 0; sample < Tap_Burst_Samples; ++sample) {
-    float ax = 0.0f;
-    float ay = 0.0f;
-    float az = 0.0f;
-    qmi.getAccelerometer(ax, ay, az);
-    if (!gravityInitialised) {
-      gravityX = ax;
-      gravityInitialised = true;
-      lastNowMS = nowMS;
-    }
-    gravityX = (Tap_Gravity_LPF_Alpha * gravityX) + ((1.0f - Tap_Gravity_LPF_Alpha) * ax);
-    const float dynamicX = ax - gravityX;
-    const float signal = fabsf(dynamicX);
-    if (signal > peakSignal) {
-      peakSignal = signal;
-    }
-    lastSignal = signal;
-    if ((sample + 1U) < Tap_Burst_Samples) {
-      delay(Tap_Burst_Spacing_MS);
-    }
-  }
-  Tap_Instant_Signal_G = lastSignal;
-  uint64_t dtMS = nowMS - lastNowMS;
-  if (dtMS > 1000ULL) {
-    dtMS = 1000ULL;
-  }
-  lastNowMS = nowMS;
-  const float decay = Tap_Envelope_Decay_G_Per_MS * static_cast<float>(dtMS);
-  if (envelope > decay) {
-    envelope -= decay;
-  } else {
-    envelope = 0.0f;
-  }
-  if (peakSignal > envelope) {
-    envelope = peakSignal;
-  }
-  sampledForCurrentNow = true;
-  sampledNowMS = nowMS;
-  return envelope;
-}
-
-// Tap Detection
-bool detectTap(uint64_t nowMS) {
-  const float tapSignal = readTapSignalX(nowMS);
-  if (tapCount > 0 && (nowMS - tapFirstMS) > Tap_Window_MS) {
-    tapCount= 0;
-    tapAboveThresh = false;
-  }
-  bool newTap = false;
-  if (tapSignal > Tap_Threshold_G) {
-    if (!tapAboveThresh) {
-      tapAboveThresh = true;
-      if (tapCount == 0 || (nowMS - tapLastMS) >= Tap_Min_Spacing_MS) {
-        newTap = true;
-      }
-    }
-  } else if (Tap_Instant_Signal_G < Tap_Release_Threshold_G) {
-    tapAboveThresh = false;
-  }
-  if (newTap) {
-    if (tapCount == 0) tapFirstMS = nowMS;
-    tapCount++;
-    tapLastMS = nowMS;
-    if (tapCount >= Tap_Number) {
-      tapCount = 0;
-      return true;
     }
   }
   return false;
@@ -499,6 +465,15 @@ static void readQmiAxesTransformed(float out_accel[3]) {
   out_accel[2] = -qmi_z;  // Forward = -QMI_Z
 }
 
+// Read Gyroscope
+static void readQmiGyroTransformed(float out_gyro[3]) {
+  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+  qmi.getGyroscope(gx, gy, gz);
+  out_gyro[0] = gx;   // X = right
+  out_gyro[1] = -gy;  // Y = down
+  out_gyro[2] = -gz;  // Z = forward
+}
+
 // Read Magnetometer
 static void readQmcAxesTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
@@ -513,16 +488,33 @@ static void readQmcAxesTransformed(float out_mag[3]) {
 
 // Read Compass Heading
 static float readCompassHeading() {
-  // Tilt reading in compass library body frame: X = right, Y = down, Z = forward.
-  float accel[3] = {0.0f, 0.0f, 0.0f};
-  readQmiAxesTransformed(accel);
-  // Magnetometer reading
-  float raw_mag[3] = {0.0f, 0.0f, 0.0f};
-  readQmcAxesTransformed(raw_mag);
-  // Apply calibration and tilt compensation
-  float compensated[3] = {0.0f, 0.0f, 0.0f};
-  compassApplyCalibrationAndTiltCompensation(raw_mag, accel, compensated);
-  return compassHeadingFromMagneticVector(compensated);
+  // Raw accelerometer data
+  float accel_body[3] = {0.0f, 0.0f, 0.0f};
+  readQmiAxesTransformed(accel_body);
+  // Raw gyroscope data
+  float gyro_body[3]  = {0.0f, 0.0f, 0.0f};
+  readQmiGyroTransformed(gyro_body);
+  // Calibrated magnetometer data
+  float raw_mag_body[3] = {0.0f, 0.0f, 0.0f};
+  float cal_mag_body[3] = {0.0f, 0.0f, 0.0f};
+  readQmcAxesTransformed(raw_mag_body);
+  compassApplyCalibration(raw_mag_body, cal_mag_body);
+  // Map body frame to Madgwick frame, yaw is heading down
+  const float ax = accel_body[2];
+  const float ay = accel_body[0];
+  const float az = accel_body[1];
+  const float gx = gyro_body[2];
+  const float gy = gyro_body[0];
+  const float gz = gyro_body[1];
+  const float mx = cal_mag_body[2];
+  const float my = cal_mag_body[0];
+  const float mz = cal_mag_body[1];
+  ahrs.update(gx, gy, gz, ax, ay, az, mx, my, mz);
+  float heading = ahrs.getYaw();
+  if (heading < 0.0f) heading += 360.0f;
+  heading = 180.0f - heading + Compass_Offset;
+  if (heading < 0.0f) heading += 360.0f;
+  return heading;
 }
 
 // Compass Calibration - Data Collection
@@ -962,10 +954,28 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
 
 void setup() {
   // Power on
+  pinMode(Button_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
-  digitalWrite(Power_Pin, HIGH);
-  delay(10);
-  pinMode(Sys_Pin, INPUT);
+  digitalWrite(Power_Pin, HIGH);  // Power initialised on
+  unsigned long bootStart = millis();
+  unsigned long pressStart = 0;
+  bool buttonEverPressed = false;
+  while (millis() - bootStart < USB_On_MS) {
+    bool buttonPressed = (digitalRead(Button_Pin) == LOW);
+    if (buttonPressed) {
+      if (!buttonEverPressed) {
+        buttonEverPressed = true;
+        pressStart = millis();
+      }
+      if (millis() - pressStart >= Button_On_MS) {
+        return;  // Battery power on
+      }
+    }
+    else if (buttonEverPressed) {
+      digitalWrite(Power_Pin, LOW);  // Battery power off
+      while(true);
+    }
+  }
   // Power conservation
   pinMode(Buzz_Pin, OUTPUT);
   digitalWrite(Buzz_Pin, LOW);
@@ -986,8 +996,8 @@ void setup() {
   display.setSPISpeed(40000000); 
   display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Check", 60, 5, ST77XX_WHITE);
-  drawCentreText("Oxygen", 130, 5, ST77XX_WHITE);
+  drawCentreText("Pre-Dive", 86, 4, ST77XX_CYAN);
+  drawCentreText("Checks", 144, 4, ST77XX_CYAN);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -1026,10 +1036,13 @@ void setup() {
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_2G,
-                          SensorQMI8658::ACC_ODR_125Hz,
+                          SensorQMI8658::ACC_ODR_250Hz,
                           SensorQMI8658::LPF_MODE_2);
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
+                      SensorQMI8658::GYR_ODR_224_2Hz,
+                      SensorQMI8658::LPF_MODE_2);
   qmi.enableAccelerometer();
-  qmi.disableGyroscope();
+  qmi.enableGyroscope();
 
   // QMC5883P initialisation
   pinMode(Boot_Pin, INPUT);
@@ -1046,6 +1059,7 @@ void setup() {
     Compass_Matrices = {};
     compassSetCalibrationMatrices(nullptr);
   }
+  ahrs.begin(100.0f);
 
   // ZHL-16C initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
@@ -1098,14 +1112,23 @@ void setup() {
         uint64_t lastDepthUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          // 10 Hz
+          // 100 Hz
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
-            // Tap detection
-            if (detectTap(nowMS)) {
-              ripNtear_Mode = !ripNtear_Mode;
+            // Button detection
+            const PressButtonEvent buttonEvent = checkButton(nowMS);
+            if (buttonEvent == PressButtonEvent::LongPress) {
+              ripNtear_Mode = !ripNtear_Mode;  // Switch GF
               ripNtear(ripNtear_Mode);
               Deco_Last_Update_MS = nowMS - Deco_Update_MS;
+            } else if (buttonEvent == PressButtonEvent::PowerOffHold) {
+              display.fillScreen(ST77XX_BLACK);
+              drawCentreText("Power", 86, 4, ST77XX_CYAN);
+              drawCentreText("Off", 144, 4, ST77XX_CYAN);
+              delay(Message_MS);
+              digitalWrite(Power_Pin, HIGH);  // Power off
+            } else if (buttonEvent == PressButtonEvent::ShortPress) {
+              // Reserved
             }
             // Calibration button detection
             if (calibrationButtonPressed(nowMS)) {
@@ -1168,10 +1191,6 @@ void setup() {
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
               digitalWrite(Power_Pin, HIGH);
-            }
-            // Power button
-            if (digitalRead(Sys_Pin) == HIGH) {
-              digitalWrite(Power_Pin, LOW);
             }
             // 0.2 Hz: ZHL-16C
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
