@@ -15,6 +15,7 @@
 #include <vector>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <magnetometer_calibration.h>
 
 // IMU data collection
 struct ImuDataPoint {
@@ -22,15 +23,20 @@ struct ImuDataPoint {
 };
 
 std::vector<ImuDataPoint> mag_data_collection;
-std::vector<ImuDataPoint> accel_data_collection;
-std::vector<ImuDataPoint> gyro_data_collection;
+std::vector<ImuDataPoint> accel_raw_collection;
+std::vector<ImuDataPoint> gyro_raw_collection;
 String mag_data_text;
+String mag_calibrated_text;
 String accel_data_text;
 String gyro_data_text;
+String calibration_html_text = "<html><body><h2>No run yet</h2><p>Press button to collect raw IMU data.</p></body></html>";
 bool collection_in_progress = false;
 bool collection_complete = false;
+bool collection_start_pending = false;
 uint32_t collection_start_ms = 0;
-constexpr uint32_t COLLECTION_DURATION_MS = 30000;  // 30 seconds
+uint32_t collection_pending_since_ms = 0;
+constexpr uint32_t COLLECTION_DURATION_MS = 60000;    // 60 seconds
+constexpr uint32_t COLLECTION_START_DELAY_MS = 5000;  // 5 seconds
 constexpr uint32_t COLLECTION_SAMPLE_PERIOD_MS = 10;  // 100 Hz
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 WebServer server(80);
@@ -72,6 +78,34 @@ constexpr uint8_t Backlight_High = 255;
 constexpr uint32_t Display_Update_MS = 50;
 constexpr uint32_t Fast_Update_MS = 100;
 
+// IMU Constants
+constexpr float Accel_Offset_X = 0.093489f;
+constexpr float Accel_Offset_Y = -0.051529f;
+constexpr float Accel_Offset_Z = 0.034036f;
+constexpr float Gyro_Offset_X = 0.4791f;
+constexpr float Gyro_Offset_Y = 5.7993f;
+constexpr float Gyro_Offset_Z = -0.7015f;
+
+// Compass Constants
+constexpr float Compass_Offset = 0.0;                  // Compass offset degrees
+constexpr float Reference_Field_Gauss = 0.49f;         // UK average magnetic field strength
+constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;  // QMC5883P at FS_8G: 3750 LSB/Gauss
+
+// Default Compass Calibration Matrix
+constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
+  .hard_iron = {431.913489, 296.874488, 374.476474},
+  .soft_iron = {
+    0.000330f, 0.000001f, -0.000020f,
+    0.000001f, 0.000308f, 0.000008f,
+    -0.000020f, 0.000008f, 0.000300f
+  },
+  .reference_field_gauss = Reference_Field_Gauss,
+  .lsb_per_gauss = Magnetometer_Lsb_Per_Gauss,
+  .fitted_field_lsb = Reference_Field_Gauss * Magnetometer_Lsb_Per_Gauss,
+  .is_valid = true
+};
+CompassCalibrationMatrices Compass_Matrices = Default_Compass_Matrices;
+
 // RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
@@ -89,38 +123,55 @@ uint32_t boot_time_ms = 0;
 float live_accel_x = 0.0f;
 float live_accel_y = 0.0f;
 float live_accel_z = 0.0f;
+float live_gyro_x = 0.0f;
+float live_gyro_y = 0.0f;
+float live_gyro_z = 0.0f;
+float live_mag_cal_x = 0.0f;
+float live_mag_cal_y = 0.0f;
+float live_mag_cal_z = 0.0f;
 uint8_t button_last_reading = HIGH;
 uint8_t button_stable_state = HIGH;
 uint32_t button_last_change_ms = 0;
+
+
+// Read gyroscope in dps (software-calibrated)
+static bool readQmiGyroDps(float out_gyro_dps[3]) {
+  float gx = 0.0f;
+  float gy = 0.0f;
+  float gz = 0.0f;
+  if (!qmi.getGyroscope(gx, gy, gz)) {
+    return false;
+  }
+  out_gyro_dps[0] = gx - Gyro_Offset_X;
+  out_gyro_dps[1] = gy - Gyro_Offset_Y;
+  out_gyro_dps[2] = gz - Gyro_Offset_Z;
+  return true;
+}
+
+// Read accelerometer in g (software-calibrated)
+static bool readQmiAccelG(float out_accel_g[3]) {
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  if (!qmi.getAccelerometer(ax, ay, az)) {
+    return false;
+  }
+  out_accel_g[0] = ax - Accel_Offset_X;
+  out_accel_g[1] = ay - Accel_Offset_Y;
+  out_accel_g[2] = az - Accel_Offset_Z;
+  return true;
+}
 
 // Read Magnetometer
 static void readQmcAxesTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
   qmc.readData(mag_data);
-  const float qmc_x = static_cast<float>(mag_data.raw.x);
-  const float qmc_y = static_cast<float>(mag_data.raw.y);
-  const float qmc_z = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -qmc_x;  // Right = -QMC_X
-  out_mag[1] = -qmc_y;  // Down = -QMC_Y
-  out_mag[2] = -qmc_z;  // Forward = -QMC_Z
-}
-
-// Read Accelerometer
-static void readQmiAxesTransformed(float out_accel[3]) {
-  float qmi_x = 0.0f, qmi_y = 0.0f, qmi_z = 0.0f;
-  qmi.getAccelerometer(qmi_x, qmi_y, qmi_z);
-  out_accel[0] = qmi_x;   // Right = QMI_X
-  out_accel[1] = -qmi_y;  // Down = -QMI_Y
-  out_accel[2] = -qmi_z;  // Forward = -QMI_Z
-}
-
-// Read Gyroscope
-static void readQmiGyroTransformed(float out_gyro[3]) {
-  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-  qmi.getGyroscope(gx, gy, gz);
-  out_gyro[0] = gx;   // Right = GX
-  out_gyro[1] = -gy;  // Down = -GY
-  out_gyro[2] = -gz;  // Forward = -GZ
+  const float mx = static_cast<float>(mag_data.raw.x);
+  const float my = static_cast<float>(mag_data.raw.y);
+  const float mz = static_cast<float>(mag_data.raw.z);
+  out_mag[0] = -mx;  // Right = -QMC_X
+  out_mag[1] = -my;  // Down = -QMC_Y
+  out_mag[2] = -mz;  // Forward = -QMC_Z
 }
 
 // Frame Buffer Management
@@ -219,48 +270,117 @@ void updateDisplay(Adafruit_GFX &target) {
     target.setCursor(10, 200);
     target.print("Count:");
     target.print(samples_collected);
+  } else if (collection_start_pending) {
+    // Delay before collection starts
+    target.setTextSize(3);
+    target.setCursor(10, 40);
+    target.print("Starting in");
+    uint32_t pending_elapsed = now_ms - collection_pending_since_ms;
+    uint32_t remaining_ms = 0;
+    if (pending_elapsed < COLLECTION_START_DELAY_MS) {
+      remaining_ms = COLLECTION_START_DELAY_MS - pending_elapsed;
+    }
+    uint32_t remaining_sec = (remaining_ms + 999) / 1000;
+    target.setTextSize(6);
+    target.setCursor(10, 110);
+    target.print(remaining_sec);
   } else if (collection_complete) {
     // Completed
-    target.setTextSize(4);
+    target.setTextSize(3);
     target.setCursor(10, 20);
-    target.print("Done!");
+    target.print("Data Ready");
     target.setTextSize(2);
     target.setCursor(10, 80);
+    target.print("/g gyro dps");
+    target.setCursor(10, 100);
+    target.print("/a accel g");
+    target.setCursor(10, 120);
+    target.print("Samples:");
+    target.print(samples_collected);
+    target.setCursor(10, 180);
     target.print("WiFi: ESP32");
-    target.setCursor(10, 105);
+    target.setCursor(10, 200);
     target.print("pwd: 12345678");
-    target.setCursor(10, 150);
-    target.print("/m  magnetometer");
-    target.setCursor(10, 170);
-    target.print("/a  accelerometer");
-    target.setCursor(10, 190);
-    target.print("/g  gyroscope");
     target.setCursor(10, 220);
     target.print("192.168.4.1");
   } else {
-    // Idle: show live accelerometer values
-    target.setTextSize(4);
-    target.setCursor(10, 40);
-    target.print("X: ");
-    target.print(live_accel_x, 4);
-    target.setCursor(10, 100);
-    target.print("Y: ");
-    target.print(live_accel_y, 4);
-    target.setCursor(10, 160);
-    target.print("Z: ");
-    target.print(live_accel_z, 4);
+    // Idle: show live gyro/accel/calibrated-mag values
+    target.setTextSize(2);
+    target.setCursor(10, 10);
+    target.print("GYR dps");
+    target.setCursor(10, 30);
+    target.print("X:");
+    target.print(live_gyro_x, 2);
+    target.setCursor(10, 46);
+    target.print("Y:");
+    target.print(live_gyro_y, 2);
+    target.setCursor(10, 62);
+    target.print("Z:");
+    target.print(live_gyro_z, 2);
+
+    target.setCursor(10, 92);
+    target.print("ACC g");
+    target.setCursor(10, 112);
+    target.print("X:");
+    target.print(live_accel_x, 3);
+    target.setCursor(10, 128);
+    target.print("Y:");
+    target.print(live_accel_y, 3);
+    target.setCursor(10, 144);
+    target.print("Z:");
+    target.print(live_accel_z, 3);
+
+    target.setCursor(10, 174);
+    target.print("MAG cal");
+    target.setCursor(10, 194);
+    target.print("X:");
+    target.print(live_mag_cal_x, 3);
+    target.setCursor(10, 210);
+    target.print("Y:");
+    target.print(live_mag_cal_y, 3);
+    target.setCursor(10, 226);
+    target.print("Z:");
+    target.print(live_mag_cal_z, 3);
+
+    target.setTextSize(2);
+    target.setCursor(190, 246);
+    target.print("dps/g/cal");
   }
 }
 
 // Web Server
+static String makeDataHtmlPage(const char *title, const String &bodyText) {
+  String html = "<!doctype html><html><head><meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>";
+  html += title;
+  html += "</title>";
+  html += "<style>body{font-family:Arial,sans-serif;background:#f5f7fb;color:#1d2636;padding:20px;}";
+  html += "main{max-width:900px;margin:0 auto;background:#fff;padding:20px;border-radius:12px;";
+  html += "box-shadow:0 10px 26px rgba(0,0,0,.08);}a{color:#2257c7;text-decoration:none;}";
+  html += "pre{background:#eef3ff;padding:12px;border-radius:8px;white-space:pre-wrap;overflow:auto;}";
+  html += "</style></head><body><main><p><a href='/'>Back</a></p><h1>";
+  html += title;
+  html += "</h1><pre>";
+  html += bodyText;
+  html += "</pre></main></body></html>";
+  return html;
+}
+
+void handleRootView() {
+  server.send(200, "text/html", calibration_html_text);
+}
 void handleMagView() {
-  server.send(200, "text/plain", mag_data_text);
+  server.send(200, "text/html", makeDataHtmlPage("Magnetometer (transformed, pre-cal)", mag_data_text));
+}
+void handleMagCalView() {
+  server.send(200, "text/html", makeDataHtmlPage("Magnetometer (transformed, post-cal)", mag_calibrated_text));
 }
 void handleAccelView() {
-  server.send(200, "text/plain", accel_data_text);
+  server.send(200, "text/html", makeDataHtmlPage("Accelerometer (g)", accel_data_text));
 }
 void handleGyroView() {
-  server.send(200, "text/plain", gyro_data_text);
+  server.send(200, "text/html", makeDataHtmlPage("Gyroscope (dps)", gyro_data_text));
 }
 
 void setup() {
@@ -300,14 +420,14 @@ void setup() {
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.enableSyncSampleMode();
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                          SensorQMI8658::ACC_ODR_125Hz,
-                          SensorQMI8658::LPF_MODE_2);
   qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
                       SensorQMI8658::GYR_ODR_112_1Hz,
                       SensorQMI8658::LPF_MODE_2);
-  qmi.enableAccelerometer();
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                          SensorQMI8658::ACC_ODR_125Hz,
+                          SensorQMI8658::LPF_MODE_2);
   qmi.enableGyroscope();
+  qmi.enableAccelerometer();
 
   // QMC5883P initialisation
   pinMode(Boot_Pin, INPUT);
@@ -315,20 +435,24 @@ void setup() {
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
       MagFullScaleRange::FS_8G,
-      200.0f,
+      100.0f,
       MagOverSampleRatio::OSR_8,
       MagDownSampleRatio::DSR_8
     );
+  compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
+  compassSetCalibrationMatrices(&Compass_Matrices);
 
   // PSRAM frame buffer initialisation
   initFrameBuffers();
   
-  // Initialize WiFi AP mode
+  // Initialise WiFi AP mode
   WiFi.mode(WIFI_AP);
   WiFi.softAP("ESP32", "12345678");
   
   // Setup web server
+  server.on("/", handleRootView);
   server.on("/m", handleMagView);
+  server.on("/m/c", handleMagCalView);
   server.on("/a", handleAccelView);
   server.on("/g", handleGyroView);
   server.begin();
@@ -366,16 +490,31 @@ void setup() {
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
         const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Fast_Update_MS);
+        const TickType_t collectionPeriodTicks = pdMS_TO_TICKS(COLLECTION_SAMPLE_PERIOD_MS);
         uint64_t lastCollectionSampleMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          // Update ccelerometer
+          // Update live gyro/accel/calibrated-mag view
           if (!collection_in_progress && !collection_complete) {
-            float accel[3] = {0.0f, 0.0f, 0.0f};
-            readQmiAxesTransformed(accel);
-            live_accel_x = accel[0];
-            live_accel_y = accel[1];
-            live_accel_z = accel[2];
+            float gyro_dps[3] = {0.0f, 0.0f, 0.0f};
+            float accel_g[3] = {0.0f, 0.0f, 0.0f};
+            float mag_raw[3] = {0.0f, 0.0f, 0.0f};
+            float mag_cal[3] = {0.0f, 0.0f, 0.0f};
+            if (readQmiGyroDps(gyro_dps)) {
+              live_gyro_x = gyro_dps[0];
+              live_gyro_y = gyro_dps[1];
+              live_gyro_z = gyro_dps[2];
+            }
+            if (readQmiAccelG(accel_g)) {
+              live_accel_x = accel_g[0];
+              live_accel_y = accel_g[1];
+              live_accel_z = accel_g[2];
+            }
+            readQmcAxesTransformed(mag_raw);
+            compassApplyCalibration(mag_raw, mag_cal);
+            live_mag_cal_x = mag_cal[0];
+            live_mag_cal_y = mag_cal[1];
+            live_mag_cal_z = mag_cal[2];
           }
           // Start collection
           const uint8_t button_reading = static_cast<uint8_t>(digitalRead(Button_Pin));
@@ -386,15 +525,22 @@ void setup() {
           if ((nowMS - button_last_change_ms) >= BUTTON_DEBOUNCE_MS) {
             if (button_reading != button_stable_state) {
               button_stable_state = button_reading;
-              if (button_stable_state == LOW && !collection_in_progress && !collection_complete) {
-                collection_in_progress = true;
-                collection_start_ms = static_cast<uint32_t>(nowMS);
-                mag_data_collection.clear();
-                accel_data_collection.clear();
-                gyro_data_collection.clear();
-                samples_collected = 0;
-                lastCollectionSampleMS = nowMS;
+              if (button_stable_state == LOW && !collection_in_progress && !collection_complete && !collection_start_pending) {
+                collection_start_pending = true;
+                collection_pending_since_ms = static_cast<uint32_t>(nowMS);
               }
+            }
+          }
+          if (collection_start_pending && !collection_in_progress && !collection_complete) {
+            if ((nowMS - collection_pending_since_ms) >= COLLECTION_START_DELAY_MS) {
+              collection_start_pending = false;
+              collection_in_progress = true;
+              collection_start_ms = static_cast<uint32_t>(nowMS);
+              mag_data_collection.clear();
+              accel_raw_collection.clear();
+              gyro_raw_collection.clear();
+              samples_collected = 0;
+              lastCollectionSampleMS = nowMS;
             }
           }
           if (!collection_in_progress || collection_complete) {
@@ -415,15 +561,21 @@ void setup() {
             // Collect samples
             if ((nowMS - lastCollectionSampleMS) >= COLLECTION_SAMPLE_PERIOD_MS) {
               float mag[3] = {0.0f, 0.0f, 0.0f};
-              float accel[3] = {0.0f, 0.0f, 0.0f};
-              float gyro[3] = {0.0f, 0.0f, 0.0f};
+              float accel_g[3] = {0.0f, 0.0f, 0.0f};
+              float gyro_dps[3] = {0.0f, 0.0f, 0.0f};
               readQmcAxesTransformed(mag);
-              readQmiAxesTransformed(accel);
-              readQmiGyroTransformed(gyro);
+              const bool accel_ok = readQmiAccelG(accel_g);
+              const bool gyro_ok = readQmiGyroDps(gyro_dps);
               mag_data_collection.push_back({mag[0], mag[1], mag[2]});
-              accel_data_collection.push_back({accel[0], accel[1], accel[2]});
-              gyro_data_collection.push_back({gyro[0], gyro[1], gyro[2]});
-              samples_collected++;
+              if (accel_ok) {
+                accel_raw_collection.push_back({accel_g[0], accel_g[1], accel_g[2]});
+              }
+              if (gyro_ok) {
+                gyro_raw_collection.push_back({gyro_dps[0], gyro_dps[1], gyro_dps[2]});
+              }
+              if (accel_ok && gyro_ok) {
+                samples_collected++;
+              }
               lastCollectionSampleMS = nowMS;
             }
             // Check if collection is done
@@ -433,41 +585,67 @@ void setup() {
               // Format magnetometer data
               mag_data_text = "";
               for (const auto& point : mag_data_collection) {
-                mag_data_text += String(point.x, 2);
+                mag_data_text += String(point.x, 1);
                 mag_data_text += "\t";
-                mag_data_text += String(point.y, 2);
+                mag_data_text += String(point.y, 1);
                 mag_data_text += "\t";
-                mag_data_text += String(point.z, 2);
+                mag_data_text += String(point.z, 1);
                 mag_data_text += "\n";
               }
-              // Format accelerometer data
+              // Format calibrated magnetometer data using compass calibration library
+              mag_calibrated_text = "";
+              for (const auto& point : mag_data_collection) {
+                float raw[3] = { point.x, point.y, point.z };
+                float calibrated[3] = {0.0f, 0.0f, 0.0f};
+                compassApplyCalibration(raw, calibrated);
+                mag_calibrated_text += String(calibrated[0], 3);
+                mag_calibrated_text += "\t";
+                mag_calibrated_text += String(calibrated[1], 3);
+                mag_calibrated_text += "\t";
+                mag_calibrated_text += String(calibrated[2], 3);
+                mag_calibrated_text += "\n";
+              }
+              // Format accelerometer data (software-calibrated g)
               accel_data_text = "";
-              for (const auto& point : accel_data_collection) {
-                accel_data_text += String(point.x, 4);
+              for (const auto& point : accel_raw_collection) {
+                accel_data_text += String(point.x, 5);
                 accel_data_text += "\t";
-                accel_data_text += String(point.y, 4);
+                accel_data_text += String(point.y, 5);
                 accel_data_text += "\t";
-                accel_data_text += String(point.z, 4);
+                accel_data_text += String(point.z, 5);
                 accel_data_text += "\n";
               }
-              // Format gyroscope data
+              // Format gyroscope data (software-calibrated dps)
               gyro_data_text = "";
-              for (const auto& point : gyro_data_collection) {
-                gyro_data_text += String(point.x, 4);
+              for (const auto& point : gyro_raw_collection) {
+                gyro_data_text += String(point.x, 5);
                 gyro_data_text += "\t";
-                gyro_data_text += String(point.y, 4);
+                gyro_data_text += String(point.y, 5);
                 gyro_data_text += "\t";
-                gyro_data_text += String(point.z, 4);
+                gyro_data_text += String(point.z, 5);
                 gyro_data_text += "\n";
               }
+              calibration_html_text = "<!doctype html><html><head><meta charset='utf-8'>";
+              calibration_html_text += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+              calibration_html_text += "<title>IMU Raw Export</title>";
+              calibration_html_text += "<style>body{font-family:Arial,sans-serif;background:#f5f7fb;color:#1d2636;padding:20px;}";
+              calibration_html_text += "main{max-width:760px;margin:0 auto;background:#fff;padding:20px;border-radius:12px;";
+              calibration_html_text += "box-shadow:0 10px 26px rgba(0,0,0,.08);}pre{background:#eef3ff;padding:12px;border-radius:8px;}";
+              calibration_html_text += "</style></head><body><main><h1>IMU Export</h1>";
+              calibration_html_text += "<ul><li><a href='/m'>/m</a> magnetometer (transformed, pre-cal)</li>";
+              calibration_html_text += "<li><a href='/m/c'>/m/c</a> magnetometer (transformed, post-cal)</li>";
+              calibration_html_text += "<li><a href='/a'>/a</a> accelerometer (g)</li>";
+              calibration_html_text += "<li><a href='/g'>/g</a> gyroscope (dps)</li></ul>";
+              calibration_html_text += "<p>Sample count: " + String(samples_collected) + "</p>";
+              calibration_html_text += "</main></body></html>";
             }
           }
           // Handle web server
           if (collection_complete) {
             server.handleClient();
           }
-          if (fastPeriodTicks > 0) {
-            vTaskDelayUntil(&lastWakeTick, fastPeriodTicks);
+          if (collectionPeriodTicks > 0) {
+            vTaskDelayUntil(&lastWakeTick, collectionPeriodTicks);
           } else {
             taskYIELD();
           }

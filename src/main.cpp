@@ -70,13 +70,32 @@ constexpr uint32_t Button_Update_MS = 10;          // Button checks and compass:
 constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
 constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
+// Button Constants
+constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
+constexpr uint32_t Button_Short_MS = 799;         // Short press threshold 799 ms
+constexpr uint32_t Button_Long_MS = 800;          // Long press threshold 800 ms
+constexpr uint32_t Button_On_MS = 1000;           // Hold for 1 second to power on
+constexpr uint32_t Button_Off_MS = 5000;          // Hold for 5 seconds to power off
+constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay 10 seconds before calibration
+
+// Depth Sensor Constants
+constexpr uint16_t Density = 1020;        // EN13319 density
+constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
+constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
+constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
+
+// ZHL-16C Constants
+constexpr uint8_t GF_Low = 60;
+constexpr uint8_t GF_High = 85;
+constexpr float Setpoint = 1.2f;
+
 // IMU Constants
-constexpr float Accel_Offset_X = 0.0f;
-constexpr float Accel_Offset_Y = 0.0f;
-constexpr float Accel_Offset_Z = 0.0f;
-constexpr float Gyro_Offset_X = -2.2240f;
-constexpr float Gyro_Offset_Y = 0.2832f;
-constexpr float Gyro_Offset_Z = -0.0727f;
+constexpr float Accel_Offset_X = 0.093489f;
+constexpr float Accel_Offset_Y = -0.051529f;
+constexpr float Accel_Offset_Z = 0.034036f;
+constexpr float Gyro_Offset_X = 0.4791f;
+constexpr float Gyro_Offset_Y = 5.7993f;
+constexpr float Gyro_Offset_Z = -0.7015f;
 
 // Compass Constants
 constexpr float Compass_Offset = 0.0;                        // Compass offset degrees
@@ -95,11 +114,11 @@ constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
 
 // Default Compass Calibration Matrix
 constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
-  .hard_iron = {879.247262, -296.961766, -242.690155},
+  .hard_iron = {431.913489, 296.874488, 374.476474},
   .soft_iron = {
-    0.000255f, -0.000002f, 0.000005f,
-    -0.000002f, 0.000263f, -0.000001f,
-    0.000005f, -0.000001f, 0.000263f
+    0.000330f, 0.000001f, -0.000020f,
+    0.000001f, 0.000308f, 0.000008f,
+    -0.000020f, 0.000008f, 0.000300f
   },
   .reference_field_gauss = Reference_Field_Gauss,
   .lsb_per_gauss = Magnetometer_Lsb_Per_Gauss,
@@ -107,25 +126,31 @@ constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
   .is_valid = true
 };
 
-// Button Constants
-constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
-constexpr uint32_t Button_Short_MS = 799;         // Short press threshold 799 ms
-constexpr uint32_t Button_Long_MS = 800;          // Long press threshold 800 ms
-constexpr uint32_t Button_On_MS = 1000;           // Hold for 1 second to power on
-constexpr uint32_t USB_On_MS = 2000;              // Assume USB power after 2 seconds
-constexpr uint32_t Button_Off_MS = 3000;          // Hold for 3 seconds to power off
-constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay 10 seconds before calibration
+// Compass labels
+struct CompassLabel {
+  int degrees;
+  const char *label;
+  uint8_t textSize;
+};
+const CompassLabel Compass_Labels[] = {
+    {0,   "N",  3},
+    {45,  "NE", 2},
+    {90,  "E",  3},
+    {135, "SE", 2},
+    {180, "S",  3},
+    {225, "SW", 2},
+    {270, "W",  3},
+    {315, "NW", 2},
+  };
 
-// Depth Sensor Constants
-constexpr uint16_t Density = 1020;        // EN13319 density
-constexpr float MBAR_PER_ATM = 1013.25f;  // mBar per atm
-constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
-constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
-
-// ZHL-16C Constants
-constexpr uint8_t GF_Low = 60;
-constexpr uint8_t GF_High = 85;
-constexpr float Setpoint = 1.2f;
+// Battery Percentage Lookup Table
+constexpr float Voltage_Table[] = {
+    3.27f, 3.61f, 3.69f, 3.71f, 3.73f, 3.75f, 3.77f, 3.79f, 3.80f, 3.82f, 3.84f,
+    3.85f, 3.87f, 3.91f, 3.95f, 3.98f, 4.02f, 4.08f, 4.11f, 4.15f, 4.20f};
+constexpr uint8_t Percentage_Table[] = {
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+    55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
+constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
 // RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
@@ -221,32 +246,6 @@ static const char* calibrationFailReasonText(CalibrationFailReason reason) {
       return "None";
   }
 }
-
-// Compass labels
-struct CompassLabel {
-  int degrees;
-  const char *label;
-  uint8_t textSize;
-};
-const CompassLabel Compass_Labels[] = {
-    {0,   "N",  3},
-    {45,  "NE", 2},
-    {90,  "E",  3},
-    {135, "SE", 2},
-    {180, "S",  3},
-    {225, "SW", 2},
-    {270, "W",  3},
-    {315, "NW", 2},
-  };
-
-// Battery Percentage Lookup Table
-constexpr float Voltage_Table[] = {
-    3.27f, 3.61f, 3.69f, 3.71f, 3.73f, 3.75f, 3.77f, 3.79f, 3.80f, 3.82f, 3.84f,
-    3.85f, 3.87f, 3.91f, 3.95f, 3.98f, 4.02f, 4.08f, 4.11f, 4.15f, 4.20f};
-constexpr uint8_t Percentage_Table[] = {
-    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
-    55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
-constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
 // Button Events
 enum class PressButtonEvent : uint8_t {
@@ -476,23 +475,11 @@ uint8_t ambientBacklightLevel(float lux) {
   return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
-// Read Accelerometer
-static void readQmiAxesTransformed(float out_accel[3]) {
-  float qmi_x = 0.0f;
-  float qmi_y = 0.0f;
-  float qmi_z = 0.0f;
-  qmi.getAccelerometer(qmi_x, qmi_y, qmi_z);
-  qmi_x -= Accel_Offset_X;
-  qmi_y -= Accel_Offset_Y;
-  qmi_z -= Accel_Offset_Z;
-  out_accel[0] = qmi_x;   // Right = QMI_X
-  out_accel[1] = -qmi_y;  // Down = -QMI_Y
-  out_accel[2] = -qmi_z;  // Forward = -QMI_Z
-}
-
 // Read Gyroscope
 static void readQmiGyroTransformed(float out_gyro[3]) {
-  float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+  float gx = 0.0f;
+  float gy = 0.0f;
+  float gz = 0.0f;
   qmi.getGyroscope(gx, gy, gz);
   gx -= Gyro_Offset_X;
   gy -= Gyro_Offset_Y;
@@ -502,16 +489,30 @@ static void readQmiGyroTransformed(float out_gyro[3]) {
   out_gyro[2] = -gz;  // Forward = -QMI_Z
 }
 
+// Read Accelerometer
+static void readQmiAxesTransformed(float out_accel[3]) {
+  float ax = 0.0f;
+  float ay = 0.0f;
+  float az = 0.0f;
+  qmi.getAccelerometer(ax, ay, az);
+  ax -= Accel_Offset_X;
+  ay -= Accel_Offset_Y;
+  az -= Accel_Offset_Z;
+  out_accel[0] = ax;   // Right = QMI_X
+  out_accel[1] = -ay;  // Down = -QMI_Y
+  out_accel[2] = -az;   // Forward = QMI_Z
+}
+
 // Read Magnetometer
 static void readQmcAxesTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
   qmc.readData(mag_data);
-  const float qmc_x = static_cast<float>(mag_data.raw.x);
-  const float qmc_y = static_cast<float>(mag_data.raw.y);
-  const float qmc_z = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -qmc_x;  // Right = -QMC_X
-  out_mag[1] = -qmc_y;  // Down = -QMC_Y
-  out_mag[2] = -qmc_z;  // Forward = -QMC_Z
+  const float mx = static_cast<float>(mag_data.raw.x);
+  const float my = static_cast<float>(mag_data.raw.y);
+  const float mz = static_cast<float>(mag_data.raw.z);
+  out_mag[0] = -mx;   // Right = -QMC_X
+  out_mag[1] = -my;   // Down = -QMC_Y
+  out_mag[2] = -mz;   // Forward = -QMC_Z
 }
 
 // Read Compass Heading
@@ -540,15 +541,15 @@ static float readCompassHeading() {
   ahrs.update(gx, gy, gz, ax, ay, az, mx, my, mz);
   float heading = ahrs.getYaw();
   if (heading < 0.0f) heading += 360.0f;
-  heading = 180.0f - heading + Compass_Offset;
+  heading = 180.0f - heading - Compass_Offset;
   if (heading < 0.0f) heading += 360.0f;
   return heading;
 }
 
 // Compass Calibration - Data Collection
 static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
-  constexpr uint32_t Calibration_Sample_Period_MS = 5;  // ODR 200 Hz
-  constexpr size_t Calibration_Max_Samples = 10000U;
+  constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
+  constexpr size_t Calibration_Max_Samples = 9999U;
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
   mag_samples_xyz.reserve(3U * Calibration_Max_Samples);
@@ -997,24 +998,13 @@ void setup() {
   // Power on
   pinMode(Button_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
-  digitalWrite(Power_Pin, HIGH);  // Power initialised on
+  digitalWrite(Power_Pin, HIGH);
   unsigned long bootStart = millis();
-  unsigned long pressStart = 0;
-  bool buttonEverPressed = false;
-  while (millis() - bootStart < USB_On_MS) {
-    bool buttonPressed = (digitalRead(Button_Pin) == LOW);
-    if (buttonPressed) {
-      if (!buttonEverPressed) {
-        buttonEverPressed = true;
-        pressStart = millis();
-      }
-      if (millis() - pressStart >= Button_On_MS) {
-        return;  // Battery power on
-      }
-    }
-    else if (buttonEverPressed) {
-      digitalWrite(Power_Pin, LOW);  // Battery power off
-      while(true);
+  while (millis() - bootStart < Button_On_MS) {
+    if (digitalRead(Button_Pin) == LOW) {
+      delay(10);
+    } else {
+      digitalWrite(Power_Pin, LOW);
     }
   }
   // Power conservation
@@ -1077,14 +1067,14 @@ void setup() {
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.enableSyncSampleMode();
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                          SensorQMI8658::ACC_ODR_125Hz,
-                          SensorQMI8658::LPF_MODE_2);            
   qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
                       SensorQMI8658::GYR_ODR_112_1Hz,
                       SensorQMI8658::LPF_MODE_2);
-  qmi.enableAccelerometer();  
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
+                          SensorQMI8658::ACC_ODR_125Hz,
+                          SensorQMI8658::LPF_MODE_2);
   qmi.enableGyroscope();
+  qmi.enableAccelerometer();  
 
   // QMC5883P initialisation
   pinMode(Boot_Pin, INPUT);
@@ -1092,7 +1082,7 @@ void setup() {
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
       MagFullScaleRange::FS_8G,
-      200.0f,
+      100.0f,
       MagOverSampleRatio::OSR_8,
       MagDownSampleRatio::DSR_8
     );
@@ -1168,7 +1158,7 @@ void setup() {
               drawCentreText("Power", 86, 4, ST77XX_CYAN);
               drawCentreText("Off", 144, 4, ST77XX_CYAN);
               delay(Message_MS);
-              digitalWrite(Power_Pin, HIGH);  // Power off
+              digitalWrite(Power_Pin, LOW);  // Power off
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
               // Reserved
             }
@@ -1232,7 +1222,7 @@ void setup() {
               drawCentreText("Battery", 86, 4, ST77XX_RED);
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
-              digitalWrite(Power_Pin, HIGH);
+              digitalWrite(Power_Pin, LOW);
             }
             // 0.2 Hz: ZHL-16C
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
