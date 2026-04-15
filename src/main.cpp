@@ -61,7 +61,7 @@ constexpr uint16_t LCD_Height = 280;
 constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen below 10% battery
 constexpr uint8_t Critical_Battery_Threshold = 1;  // Shut down below 1% battery
 constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 10000.0f;        // Lux level at high backlight
+constexpr float Ambient_Lux_Max = 40000.0f;        // Lux level at high backlight
 constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
 constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
 constexpr uint32_t Message_MS = 5000;              // Display messages for 5 seconds
@@ -176,6 +176,7 @@ int Seconds = 0;
 uint64_t Timer_Start_MS = 0;
 
 // Battery
+bool USB_Powered = false;
 float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
@@ -651,26 +652,26 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
   }
   display.setTextSize(3);
   display.setTextColor(state_colour);
-  display.setCursor(40, 10);
+  display.setCursor(40, 20);
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(20, 60);
+  display.setCursor(20, 70);
   display.print("Method: ");
   display.print(compassCalibrationMethodText(Last_Calibration_Method));
-  display.setCursor(20, 90);
+  display.setCursor(20, 100);
   display.print("Reason: ");
   display.print(calibrationFailReasonText(Last_Calibration_Fail_Reason));
-  display.setCursor(20, 120);
+  display.setCursor(20, 130);
   display.print("Samples: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Sample_Count));
-  display.setCursor(20, 150);
+  display.setCursor(20, 160);
   display.print("Rate Hz: ");
   display.print(sample_rate_hz, 1);
-  display.setCursor(20, 180);
+  display.setCursor(20, 190);
   display.print("Time ms: ");
   display.print(static_cast<unsigned long>(Last_Calibration_Elapsed_MS));
-  display.setCursor(20, 210);
+  display.setCursor(20, 220);
   display.print("Quality: ");
   display.print(Last_Calibration_Quality.is_valid ? "Valid" : "Invalid");
 }
@@ -696,31 +697,27 @@ static void drawCalibrationScore() {
   }
   display.setTextSize(3);
   display.setTextColor(score_colour);
-  display.setCursor(40, 10);
+  display.setCursor(40, 20);
   display.print("Score: ");
   display.print(score);
   display.print("%");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(20, 60);
+  display.setCursor(20, 70);
   display.print("Count: ");
   display.print(Last_Calibration_Quality.used_sample_count);
-  display.setCursor(20, 90);
+  display.setCursor(20, 100);
   display.print("Span: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.used_sample_count));
-  display.setCursor(20, 120);
+  display.setCursor(20, 130);
   display.print("Oct: ");
   display.print(static_cast<int>(Last_Calibration_Quality.octant_coverage_score + 0.5f));
   display.print("%");
-  display.setCursor(20, 150);
+  display.setCursor(20, 160);
   display.print("PCA: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.unit_vector_pca_ratio_score + 0.5f));
   display.print("%");
-  display.setCursor(20, 180);
-  display.print("Residual: ");
-  display.print(static_cast<unsigned int>(Last_Calibration_Quality.ellipsoid_residual_score + 0.5f));
-  display.print("%");
-  display.setCursor(20, 210);
+  display.setCursor(20, 190);
   display.print("Rad Std: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Quality.calibrated_radius_std_score + 0.5f));
   display.print("%");
@@ -999,13 +996,22 @@ void setup() {
   pinMode(Button_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
   digitalWrite(Power_Pin, HIGH);
-  unsigned long bootStart = millis();
-  while (millis() - bootStart < Button_On_MS) {
-    if (digitalRead(Button_Pin) == LOW) {
-      delay(10);
-    } else {
-      digitalWrite(Power_Pin, LOW);
+  delay(10);
+  bool buttonHeld = true;
+  const uint32_t Boot_Time_MS = millis();
+  while ((millis() - Boot_Time_MS) < Button_On_MS) {
+    if (digitalRead(Button_Pin) != LOW) {
+      buttonHeld = false;
+      break;
     }
+    delay(10);
+  }
+  if (!buttonHeld) {
+    digitalWrite(Power_Pin, LOW);
+    delay(100);  // Power off if button not held
+    USB_Powered = true;  // USB powered if program continues
+  } else {
+    USB_Powered = false;
   }
   // Power conservation
   pinMode(Buzz_Pin, OUTPUT);
@@ -1019,6 +1025,11 @@ void setup() {
   };
   esp_pm_configure(&pm_config);
 
+  // ADC initialisation
+  pinMode(Battery_Pin, INPUT);
+  analogReadResolution(12);        // Internal ADC resolution 12-bit
+  analogSetAttenuation(ADC_11db);  // 2.5V range
+
   // Display initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
   pinMode(Backlight_Pin, OUTPUT);
@@ -1026,16 +1037,38 @@ void setup() {
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setSPISpeed(40000000); 
   display.setRotation(1);
+
+  // Charging screen
   display.fillScreen(ST77XX_BLACK);
+  if (USB_Powered) {
+    drawCentreText("Charging", 50, 5, ST77XX_GREEN);
+    uint32_t lastUpdate = 0;
+    for (;;) {
+      const uint32_t now = millis();
+      // Show battery percentage while charging
+      if ((now - lastUpdate) >= 1000) {
+        lastUpdate = now;
+        Battery_Percentage = readBatteryPercentage();
+        char battStr[5];
+        snprintf(battStr, sizeof(battStr), "%u%%", Battery_Percentage);
+        display.fillRect(40, 120, 200, 64, ST77XX_BLACK);
+        drawCentreText(battStr, 120, 8, ST77XX_CYAN);
+      }
+      // Exit charging screen if button pressed
+      if (digitalRead(Button_Pin) == LOW) {
+        USB_Powered = false;
+        display.fillScreen(ST77XX_BLACK);
+        break;
+      }
+      delay(50);
+    }
+  }
+
+  // Initial screen
   drawCentreText("Pre-Dive", 86, 4, ST77XX_CYAN);
   drawCentreText("Checks", 144, 4, ST77XX_CYAN);
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
-
-  // ADC
-  pinMode(Battery_Pin, INPUT);
-  analogReadResolution(12);        // Internal ADC resolution 12-bit
-  analogSetAttenuation(ADC_11db);  // 2.5V range
 
   // Power MS5837
   pinMode(Sensor_GND_Pin, OUTPUT);
@@ -1049,17 +1082,17 @@ void setup() {
   sensorWire.setClock(400000);
   delay(10);
 
-  // I2C initialisation
-  Wire.begin(SDA_Pin, SCL_Pin);
-  Wire.setClock(400000);
-  delay(10);
-
   // MS5837 initialisation
   sensorAvailable = sensor.init(sensorWire);
   if (sensorAvailable) {
     sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
     sensor.setFluidDensity(Density);       // Set water density
   }
+
+  // Peripheral I2C initialisation
+  Wire.begin(SDA_Pin, SCL_Pin);
+  Wire.setClock(400000);
+  delay(10);
 
   // BH1750 initialisation
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_I2C_Address, &Wire);  // 4 lux, 16 ms
@@ -1154,6 +1187,9 @@ void setup() {
               ripNtear(ripNtear_Mode);
               Deco_Last_Update_MS = nowMS - Deco_Update_MS;
             } else if (buttonEvent == PressButtonEvent::PowerOffHold) {
+              if (Display_Task_Handle != nullptr) {
+                vTaskSuspend(Display_Task_Handle);
+              }
               display.fillScreen(ST77XX_BLACK);
               drawCentreText("Power", 86, 4, ST77XX_CYAN);
               drawCentreText("Off", 144, 4, ST77XX_CYAN);
