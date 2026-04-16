@@ -21,7 +21,6 @@
 struct ImuDataPoint {
   float x, y, z;
 };
-
 std::vector<ImuDataPoint> mag_data_collection;
 std::vector<ImuDataPoint> accel_raw_collection;
 std::vector<ImuDataPoint> gyro_raw_collection;
@@ -349,38 +348,20 @@ void updateDisplay(Adafruit_GFX &target) {
 }
 
 // Web Server
-static String makeDataHtmlPage(const char *title, const String &bodyText) {
-  String html = "<!doctype html><html><head><meta charset='utf-8'>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<title>";
-  html += title;
-  html += "</title>";
-  html += "<style>body{font-family:Arial,sans-serif;background:#f5f7fb;color:#1d2636;padding:20px;}";
-  html += "main{max-width:900px;margin:0 auto;background:#fff;padding:20px;border-radius:12px;";
-  html += "box-shadow:0 10px 26px rgba(0,0,0,.08);}a{color:#2257c7;text-decoration:none;}";
-  html += "pre{background:#eef3ff;padding:12px;border-radius:8px;white-space:pre-wrap;overflow:auto;}";
-  html += "</style></head><body><main><p><a href='/'>Back</a></p><h1>";
-  html += title;
-  html += "</h1><pre>";
-  html += bodyText;
-  html += "</pre></main></body></html>";
-  return html;
-}
-
 void handleRootView() {
   server.send(200, "text/html", calibration_html_text);
 }
 void handleMagView() {
-  server.send(200, "text/html", makeDataHtmlPage("Magnetometer (transformed, pre-cal)", mag_data_text));
+  server.send(200, "text/plain", mag_data_text);
 }
 void handleMagCalView() {
-  server.send(200, "text/html", makeDataHtmlPage("Magnetometer (transformed, post-cal)", mag_calibrated_text));
+  server.send(200, "text/plain", mag_calibrated_text);
 }
 void handleAccelView() {
-  server.send(200, "text/html", makeDataHtmlPage("Accelerometer (g)", accel_data_text));
+  server.send(200, "text/plain", accel_data_text);
 }
 void handleGyroView() {
-  server.send(200, "text/html", makeDataHtmlPage("Gyroscope (dps)", gyro_data_text));
+  server.send(200, "text/plain", gyro_data_text);
 }
 
 void setup() {

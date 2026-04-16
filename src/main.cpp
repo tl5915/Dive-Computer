@@ -71,12 +71,17 @@ constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updat
 constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
 // Button Constants
-constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time 50 ms
-constexpr uint32_t Button_Short_MS = 799;         // Short press threshold 799 ms
-constexpr uint32_t Button_Long_MS = 800;          // Long press threshold 800 ms
-constexpr uint32_t Button_On_MS = 1000;           // Hold for 1 second to power on
-constexpr uint32_t Button_Off_MS = 5000;          // Hold for 5 seconds to power off
-constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay 10 seconds before calibration
+constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time
+constexpr uint32_t Button_Short_MS = 799;         // Short press threshold
+constexpr uint32_t Button_Long_MS = 800;          // Long press threshold
+constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
+constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
+
+// Buzzer Constants
+constexpr uint16_t Frequency_Low = 250;   // 250 Hz low tune
+constexpr uint16_t Frequency_High = 500;  // 500 Hz high tune
+constexpr uint8_t Horn_Duration_MS = 8;   // 8 ms per tone
+constexpr uint8_t Horn_Cycles = 30;       // 30 cycles
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -152,6 +157,30 @@ constexpr uint8_t Percentage_Table[] = {
     55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
+// Demo dive profile
+constexpr bool Demo_Mode = false;
+static float simulatedDepthMeters(uint64_t elapsedMS) {
+  const float tSec = static_cast<float>(elapsedMS) / 1000.0f;
+  if (tSec < 120.0f) return 0.0f + 30.0f * (tSec / 60.0f);               // 0 -> 60 in 2 min
+  if (tSec < 1800.0f) return 60.0f;                                      // 60m 28 min
+  if (tSec < 2040.0f) return 60.0f - 9.0f * ((tSec - 1800.0f) / 60.0f);  // 60 -> 24
+  if (tSec < 2160.0f) return 24.0f;                                      // 24m 2 min
+  if (tSec < 2180.0f) return 24.0f - 9.0f * ((tSec - 2160.0f) / 60.0f);  // 24 -> 21
+  if (tSec < 2300.0f) return 21.0f;                                      // 21m 2 min
+  if (tSec < 2320.0f) return 21.0f - 9.0f * ((tSec - 2300.0f) / 60.0f);  // 21 -> 18
+  if (tSec < 2500.0f) return 18.0f;                                      // 18m 3 min
+  if (tSec < 2520.0f) return 18.0f - 9.0f * ((tSec - 2500.0f) / 60.0f);  // 18 -> 15
+  if (tSec < 2820.0f) return 15.0f;                                      // 15m 5 min
+  if (tSec < 2840.0f) return 15.0f - 9.0f * ((tSec - 2820.0f) / 60.0f);  // 15 -> 12
+  if (tSec < 3200.0f) return 12.0f;                                      // 12m 6 min
+  if (tSec < 3220.0f) return 12.0f - 9.0f * ((tSec - 3200.0f) / 60.0f);  // 12 -> 9
+  if (tSec < 3700.0f) return 9.0f;                                       // 9m 8 min
+  if (tSec < 3720.0f) return 9.0f - 9.0f * ((tSec - 3700.0f) / 60.0f);   // 9 -> 6
+  if (tSec < 5820.0f) return 6.0f;                                       // Hold 6 for 35 min
+  if (tSec < 5860.0f) return 6.0f - 9.0f * ((tSec - 5820.0f) / 60.0f);   // 6 -> 0
+  return 0.0f;
+}
+
 // RTOS
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
@@ -167,20 +196,25 @@ bool Frame_Have_Previous = false;
 bool ripNtear_Mode = false;
 
 // Dive metrics
-bool Dive_Timer_Started = false;
-bool sensorAvailable = false;
-float Depth = 0.0f;
 float Heading = 0.0f;
+float Depth = 0.0f;
 int Minutes = 0;
 int Seconds = 0;
+int Stopwatch_Minutes = 0;
+int Stopwatch_Seconds = 0;
 uint64_t Timer_Start_MS = 0;
+uint64_t Stopwatch_Start_MS = 0;
+uint64_t Simulated_Profile_Start_MS = 0;
+bool Dive_Timer_Started = false;
+bool Stopwatch_Active = false;
+bool sensorAvailable = false;
 
 // Battery
-bool USB_Powered = false;
 float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
+bool USB_Powered = false;
 
 // Calibration button (boot button)
 uint8_t Boot_Last_Reading = HIGH;
@@ -193,7 +227,7 @@ uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
 uint64_t Button_Press_Start_MS = 0;
 bool Button_Long_Event_Fired = false;
-bool Button_Power_Off_Event_Fired = false;
+bool Button_Hold_Event_Fired = false;
 
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
@@ -253,9 +287,8 @@ enum class PressButtonEvent : uint8_t {
   None = 0,
   ShortPress,
   LongPress,
-  PowerOffHold,
+  HoldPress,
 };
-
 
 // Button State
 PressButtonEvent checkButton(uint64_t nowMS) {
@@ -271,30 +304,41 @@ PressButtonEvent checkButton(uint64_t nowMS) {
       if (Button_Stable_State == LOW) {
         Button_Press_Start_MS = nowMS;
         Button_Long_Event_Fired = false;
-        Button_Power_Off_Event_Fired = false;
+        Button_Hold_Event_Fired = false;
       } else {
         const uint64_t heldMS = nowMS - Button_Press_Start_MS;
         if (!Button_Long_Event_Fired && heldMS <= Button_Short_MS) {
           event = PressButtonEvent::ShortPress;
+        } else if (!Button_Hold_Event_Fired && heldMS >= Button_Long_MS) {
+          Button_Long_Event_Fired = true;
+          event = PressButtonEvent::LongPress;
         }
       }
     }
     if (Button_Stable_State == LOW) {
       const uint64_t heldMS = nowMS - Button_Press_Start_MS;
-      if (!Button_Power_Off_Event_Fired && heldMS >= Button_Off_MS) {
-        Button_Power_Off_Event_Fired = true;
-        event = PressButtonEvent::PowerOffHold;
-      } else if (!Button_Long_Event_Fired && heldMS >= Button_Long_MS) {
-        Button_Long_Event_Fired = true;
-        event = PressButtonEvent::LongPress;
+      if (!Button_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
+        Button_Hold_Event_Fired = true;
+        event = PressButtonEvent::HoldPress;
       }
     }
   }
   return event;
 }
 
+// Horn: alternating dual tune
+void horn() {
+  for (int i = 0; i < Horn_Cycles; i++) {
+    tone(Buzz_Pin, Frequency_Low);
+    delay(Horn_Duration_MS);
+    tone(Buzz_Pin, Frequency_High);
+    delay(Horn_Duration_MS);
+  }
+  noTone(Buzz_Pin);
+}
+
 // Frame Buffer Management
-static bool initFrameBuffers() {
+bool initFrameBuffers() {
   Render_Width = static_cast<uint16_t>(display.width());
   Render_Height = static_cast<uint16_t>(display.height());
   Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
@@ -315,7 +359,7 @@ static bool initFrameBuffers() {
 }
 
 // Flush from PSRAM
-static void flushDirtyRectFromPSRAM() {
+void flushDirtyRectFromPSRAM() {
   if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
     return;
   }
@@ -372,7 +416,7 @@ static void flushDirtyRectFromPSRAM() {
 }
 
 // Load Calibration
-static bool loadCompassCalibrationFromNVS() {
+bool loadCompassCalibrationFromNVS() {
   if (!prefs.begin(Compass_NVS_Namespace, true)) {
     return false;
   }
@@ -404,7 +448,7 @@ static bool loadCompassCalibrationFromNVS() {
 }
 
 // Save Calibration
-static void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
+void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
   if (!prefs.begin(Compass_NVS_Namespace, false)) {
     return;
   }
@@ -477,7 +521,7 @@ uint8_t ambientBacklightLevel(float lux) {
 }
 
 // Read Gyroscope
-static void readQmiGyroTransformed(float out_gyro[3]) {
+void readGyroTransformed(float out_gyro[3]) {
   float gx = 0.0f;
   float gy = 0.0f;
   float gz = 0.0f;
@@ -491,7 +535,7 @@ static void readQmiGyroTransformed(float out_gyro[3]) {
 }
 
 // Read Accelerometer
-static void readQmiAxesTransformed(float out_accel[3]) {
+void readAccelTransformed(float out_accel[3]) {
   float ax = 0.0f;
   float ay = 0.0f;
   float az = 0.0f;
@@ -505,29 +549,29 @@ static void readQmiAxesTransformed(float out_accel[3]) {
 }
 
 // Read Magnetometer
-static void readQmcAxesTransformed(float out_mag[3]) {
+void readMagTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
   qmc.readData(mag_data);
-  const float mx = static_cast<float>(mag_data.raw.x);
-  const float my = static_cast<float>(mag_data.raw.y);
-  const float mz = static_cast<float>(mag_data.raw.z);
+  float mx = static_cast<float>(mag_data.raw.x);
+  float my = static_cast<float>(mag_data.raw.y);
+  float mz = static_cast<float>(mag_data.raw.z);
   out_mag[0] = -mx;   // Right = -QMC_X
   out_mag[1] = -my;   // Down = -QMC_Y
   out_mag[2] = -mz;   // Forward = -QMC_Z
 }
 
 // Read Compass Heading
-static float readCompassHeading() {
+float readCompassHeading() {
   // Raw accelerometer data
   float accel_body[3] = {0.0f, 0.0f, 0.0f};
-  readQmiAxesTransformed(accel_body);
+  readAccelTransformed(accel_body);
   // Raw gyroscope data
   float gyro_body[3]  = {0.0f, 0.0f, 0.0f};
-  readQmiGyroTransformed(gyro_body);
+  readGyroTransformed(gyro_body);
   // Calibrated magnetometer data
   float raw_mag_body[3] = {0.0f, 0.0f, 0.0f};
   float cal_mag_body[3] = {0.0f, 0.0f, 0.0f};
-  readQmcAxesTransformed(raw_mag_body);
+  readMagTransformed(raw_mag_body);
   compassApplyCalibration(raw_mag_body, cal_mag_body);
   // Map body frame to AHRS frame, yaw is heading down
   const float ax = accel_body[2];
@@ -548,9 +592,9 @@ static float readCompassHeading() {
 }
 
 // Compass Calibration - Data Collection
-static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
+bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
   constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
-  constexpr size_t Calibration_Max_Samples = 9999U;
+  constexpr size_t Calibration_Max_Samples = 9999U;      // Maximum 9999 samples
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
   mag_samples_xyz.reserve(3U * Calibration_Max_Samples);
@@ -563,7 +607,7 @@ static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
         break;
       }
       float raw_mag[3] = {0.0f, 0.0f, 0.0f};
-      readQmcAxesTransformed(raw_mag);
+      readMagTransformed(raw_mag);
       mag_samples_xyz.push_back(raw_mag[0]);
       mag_samples_xyz.push_back(raw_mag[1]);
       mag_samples_xyz.push_back(raw_mag[2]);
@@ -576,7 +620,7 @@ static bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
 }
 
 // Compass Calibration - Computation
-static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz) {
+bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz) {
   const size_t sample_count = mag_samples_xyz.size() / 3U;
   Last_Calibration_Fail_Reason = CalibrationFailReason::None;
   if (sample_count < 50U) {
@@ -636,7 +680,7 @@ static bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz)
 }
 
 // Compass Calibration - Diagnostics Display
-static void drawCalibrationDiagnostics(bool calibration_ok) {
+void drawCalibrationDiagnostics(bool calibration_ok) {
   display.fillScreen(ST77XX_BLACK);
   float sample_rate_hz = 0.0f;
   if (Last_Calibration_Elapsed_MS > 0) {
@@ -677,7 +721,7 @@ static void drawCalibrationDiagnostics(bool calibration_ok) {
 }
 
 // Calibration Score Display
-static void drawCalibrationScore() {
+void drawCalibrationScore() {
   display.fillScreen(ST77XX_BLACK);
   if (!Last_Calibration_Quality.is_valid) {
     drawCentreText("N/A", 20, 220, ST77XX_RED);
@@ -736,6 +780,30 @@ void updateTimer(float Depth, uint64_t nowMS) {
     Seconds = static_cast<int>((elapsedMS % 60000ULL) / 1000ULL);
     if (Seconds > 59) Seconds = 59;
   }
+}
+
+// Stopwatch
+void updateStopwatch(uint64_t nowMS) {
+  if (!Stopwatch_Active) {
+    return;
+  }
+  const uint64_t elapsedMS = nowMS - Stopwatch_Start_MS;
+  Stopwatch_Minutes = static_cast<int>(elapsedMS / 60000ULL);
+  if (Stopwatch_Minutes > 999) Stopwatch_Minutes = 999;
+  Stopwatch_Seconds = static_cast<int>((elapsedMS % 60000ULL) / 1000ULL);
+  if (Stopwatch_Seconds > 59) Stopwatch_Seconds = 59;
+}
+void startStopwatch(uint64_t nowMS) {
+  Stopwatch_Active = true;
+  Stopwatch_Start_MS = nowMS;
+  Stopwatch_Minutes = 0;
+  Stopwatch_Seconds = 0;
+}
+void stopAndResetStopwatch() {
+  Stopwatch_Active = false;
+  Stopwatch_Start_MS = 0;
+  Stopwatch_Minutes = 0;
+  Stopwatch_Seconds = 0;
 }
 
 // Battery Voltage
@@ -935,7 +1003,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
   target.setTextSize(4);
-  target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
+  target.setTextColor(ST77XX_MAGENTA, Stopwatch_Active ? ST77XX_WHITE : ST77XX_BLACK);
   target.setCursor(0, 118);
   target.print(timerString);
   // Draw heading right of timer
@@ -994,12 +1062,13 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
 void setup() {
   // Power on
   pinMode(Button_Pin, INPUT);
+  pinMode(Boot_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
   digitalWrite(Power_Pin, HIGH);
   delay(10);
   bool buttonHeld = true;
   const uint32_t Boot_Time_MS = millis();
-  while ((millis() - Boot_Time_MS) < Button_On_MS) {
+  while ((millis() - Boot_Time_MS) < Button_Long_MS) {
     if (digitalRead(Button_Pin) != LOW) {
       buttonHeld = false;
       break;
@@ -1070,23 +1139,25 @@ void setup() {
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
-  // Power MS5837
-  pinMode(Sensor_GND_Pin, OUTPUT);
-  pinMode(Sensor_VCC_Pin, OUTPUT);
-  digitalWrite(Sensor_GND_Pin, LOW);
-  digitalWrite(Sensor_VCC_Pin, HIGH);
-  delay(10);
-
-  // MS5837 dedicated I2C initialisation
-  sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
-  sensorWire.setClock(400000);
-  delay(10);
-
-  // MS5837 initialisation
-  sensorAvailable = sensor.init(sensorWire);
-  if (sensorAvailable) {
-    sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
-    sensor.setFluidDensity(Density);       // Set water density
+  // MS5837 initialisation if not in demo mode
+  Simulated_Profile_Start_MS = millis();
+  if (!Demo_Mode) {
+    // Power MS5837
+    pinMode(Sensor_GND_Pin, OUTPUT);
+    pinMode(Sensor_VCC_Pin, OUTPUT);
+    digitalWrite(Sensor_GND_Pin, LOW);
+    digitalWrite(Sensor_VCC_Pin, HIGH);
+    delay(10);
+    // MS5837 dedicated I2C initialisation
+    sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
+    sensorWire.setClock(400000);
+    delay(10);
+    // MS5837 initialisation
+    sensorAvailable = sensor.init(sensorWire);
+    if (sensorAvailable) {
+      sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
+      sensor.setFluidDensity(Density);       // Set water density
+    }
   }
 
   // Peripheral I2C initialisation
@@ -1110,7 +1181,6 @@ void setup() {
   qmi.enableAccelerometer();  
 
   // QMC5883P initialisation
-  pinMode(Boot_Pin, INPUT);
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
   qmc.configMagnetometer(
       OperationMode::CONTINUOUS_MEASUREMENT,
@@ -1146,13 +1216,15 @@ void setup() {
         TickType_t lastWakeTick = xTaskGetTickCount();
         const TickType_t displayPeriodTicks = pdMS_TO_TICKS(Display_Update_MS);
         for (;;) {
+          const int displayMinutes = Stopwatch_Active ? Stopwatch_Minutes : Minutes;
+          const int displaySeconds = Stopwatch_Active ? Stopwatch_Seconds : Seconds;
           if (Frame_Canvas != nullptr && Frame_Back_Current != nullptr) {
             Frame_Canvas->fillScreen(ST77XX_BLACK);
-            updateDisplay(*Frame_Canvas, Depth, Minutes, Seconds, lastDecoResult);
+            updateDisplay(*Frame_Canvas, Depth, displayMinutes, displaySeconds, lastDecoResult);
             memcpy(Frame_Back_Current, Frame_Canvas->getBuffer(), Frame_Buffer_Bytes);
             flushDirtyRectFromPSRAM();
           } else {
-            updateDisplay(display, Depth, Minutes, Seconds, lastDecoResult);
+            updateDisplay(display, Depth, displayMinutes, displaySeconds, lastDecoResult);
           }
           if (displayPeriodTicks > 0) {
             vTaskDelayUntil(&lastWakeTick, displayPeriodTicks);
@@ -1180,46 +1252,71 @@ void setup() {
           // 100 Hz
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
+            updateStopwatch(nowMS);
             // Button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
-              ripNtear_Mode = !ripNtear_Mode;  // Switch GF
-              ripNtear(ripNtear_Mode);
-              Deco_Last_Update_MS = nowMS - Deco_Update_MS;
-            } else if (buttonEvent == PressButtonEvent::PowerOffHold) {
-              if (Display_Task_Handle != nullptr) {
-                vTaskSuspend(Display_Task_Handle);
+              // Long press toggles stopwatch
+              if (Stopwatch_Active) {
+                stopAndResetStopwatch();
+              } else {
+                startStopwatch(nowMS);
               }
-              display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Power", 86, 4, ST77XX_CYAN);
-              drawCentreText("Off", 144, 4, ST77XX_CYAN);
-              delay(Message_MS);
-              digitalWrite(Power_Pin, LOW);  // Power off
+            } else if (buttonEvent == PressButtonEvent::HoldPress) {
+              if (Depth >= Dive_Start_Depth) {
+                // Hold button to change GF underwater
+                ripNtear_Mode = !ripNtear_Mode;
+                ripNtear(ripNtear_Mode);
+                Deco_Last_Update_MS = nowMS - Deco_Update_MS;
+              } else {
+                // Hold button to power off on surface
+                if (Display_Task_Handle != nullptr) {
+                  vTaskSuspend(Display_Task_Handle);
+                }
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Power", 86, 4, ST77XX_CYAN);
+                drawCentreText("Off", 144, 4, ST77XX_CYAN);
+                delay(Message_MS);
+                digitalWrite(Power_Pin, LOW);
+              }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
-              // Reserved
+              horn();
             }
             // Calibration button detection
             if (calibrationButtonPressed(nowMS)) {
-              if (Display_Task_Handle != nullptr) {
-                vTaskSuspend(Display_Task_Handle);
+              if (Depth >= Dive_Start_Depth) {
+                // Power off when underwater
+                if (Display_Task_Handle != nullptr) {
+                  vTaskSuspend(Display_Task_Handle);
+                }
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Power", 86, 4, ST77XX_CYAN);
+                drawCentreText("Off", 144, 4, ST77XX_CYAN);
+                delay(Message_MS);
+                digitalWrite(Power_Pin, LOW);
+              } else {
+                if (Display_Task_Handle != nullptr) {
+                  vTaskSuspend(Display_Task_Handle);
+                }
+                // Start compass calibration on surface
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Compass", 60, 4, ST77XX_WHITE);
+                drawCentreText("Calibration", 130, 4, ST77XX_WHITE);
+                delay(Calibration_Delay_MS);
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
+                std::vector<float> mag_samples_xyz;
+                collectCompassSamples(mag_samples_xyz);
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
+                const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
+                drawCalibrationDiagnostics(calibration_ok);
+                delay(Message_MS * 3);
+                drawCalibrationScore();
+                delay(Message_MS * 3);
+                display.fillScreen(ST77XX_BLACK);
+                esp_restart();  // Restart after calibration
               }
-              display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Compass", 60, 4, ST77XX_WHITE);
-              drawCentreText("Calibration", 130, 4, ST77XX_WHITE);
-              delay(Calibration_Delay_MS);
-              display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
-              std::vector<float> mag_samples_xyz;
-              collectCompassSamples(mag_samples_xyz);
-              display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
-              const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
-              drawCalibrationDiagnostics(calibration_ok);
-              delay(Message_MS * 3);
-              drawCalibrationScore();
-              delay(Message_MS * 3);
-              display.fillScreen(ST77XX_BLACK);
-              esp_restart();  // Restart after calibration
             }
             // Compass
             Heading = readCompassHeading();
@@ -1228,16 +1325,24 @@ void setup() {
           if ((nowMS - lastDepthUpdateMS) >= Depth_Update_MS) {
             lastDepthUpdateMS = nowMS;
             // Depth
-            float pressureMbar = MBAR_PER_ATM;
             float pressureAtm = 1.0f;
-            if (sensorAvailable) {
+            if (Demo_Mode) {
+              // Demo dive profile
+              const uint64_t elapsedProfileMS = nowMS - Simulated_Profile_Start_MS;
+              Depth = simulatedDepthMeters(elapsedProfileMS);
+              pressureAtm = 1.0f + (Depth / 10.0f);
+              if (pressureAtm < 1.0f) {
+                pressureAtm = 1.0f;
+              }
+            } else if (sensorAvailable) {
+              // MS5837 sensor reading
               sensor.read();
               Depth = sensor.depth() - Depth_Offset;
-              pressureMbar = sensor.pressure();
-              pressureAtm = pressureMbar / MBAR_PER_ATM;
+              pressureAtm = sensor.pressure() / MBAR_PER_ATM;
             } else {
-              Depth = 99.9f;        // Fall back if MS5837 unavailable
-              pressureAtm = 11.0f;  // Fall back if MS5837 unavailable
+              // Fall back values if MS5837 unavailable
+              Depth = 99.9f;
+              pressureAtm = 11.0f;
             }
             //Timer
             updateTimer(Depth, nowMS);
