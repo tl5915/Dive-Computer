@@ -21,7 +21,6 @@
 #include <magnetometer_calibration.h>
 // Demo dive profile
 #include "demo.h"
-constexpr bool Demo_Mode = false;
 
 // Pins
 constexpr uint8_t Boot_Pin = 0;
@@ -81,8 +80,8 @@ constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
 
 // Buzzer Constants
-constexpr uint16_t Buzzer_Frequency = 500;
-constexpr uint16_t Buzzer_Duration_MS = 1000;
+constexpr uint16_t Buzzer_Frequency = 3800;
+constexpr uint16_t Buzzer_Duration_MS = 500;
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -117,6 +116,8 @@ constexpr const char *Soft_Iron_Key = "soft_iron";
 constexpr const char *Reference_Mag_Gauss_Key = "ref_gauss";
 constexpr const char *Lsb_Per_Gauss_Key = "lsb_gauss";
 constexpr const char *Fitted_Field_Lsb_Key = "fit_lsb";
+constexpr const char *Settings_NVS_Namespace = "settings";
+constexpr const char *Demo_Mode_Key = "demo_mode";
 
 // Default Compass Calibration Matrix
 constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
@@ -170,6 +171,7 @@ uint16_t Render_Height = 0;
 bool Frame_Have_Previous = false;
 
 // Modes
+bool Demo_Mode = false;
 bool ripNtear_Mode = false;
 
 // Dive metrics
@@ -193,18 +195,20 @@ uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
 bool USB_Powered = false;
 
-// Calibration button (boot button)
-uint8_t Boot_Last_Reading = HIGH;
-uint8_t Boot_Stable_State = HIGH;
-uint64_t Boot_Last_Change_MS = 0;
-
-// User button
+// Press button
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
 uint64_t Button_Press_Start_MS = 0;
 bool Button_Long_Event_Fired = false;
 bool Button_Hold_Event_Fired = false;
+
+// Boot button
+uint8_t Boot_Last_Reading = HIGH;
+uint8_t Boot_Stable_State = HIGH;
+uint64_t Boot_Last_Change_MS = 0;
+uint64_t Boot_Press_Start_MS = 0;
+bool Boot_Long_Event_Fired = false;
 
 // Buzzer
 bool Buzzer_Active = false;
@@ -263,15 +267,13 @@ static const char* calibrationFailReasonText(CalibrationFailReason reason) {
   }
 }
 
-// Button Events
+// Press Button State
 enum class PressButtonEvent : uint8_t {
   None = 0,
   ShortPress,
   LongPress,
   HoldPress,
 };
-
-// Button State
 PressButtonEvent checkButton(uint64_t nowMS) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(Button_Pin));
   if (reading != Button_Last_Reading) {
@@ -301,6 +303,39 @@ PressButtonEvent checkButton(uint64_t nowMS) {
       if (!Button_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
         Button_Hold_Event_Fired = true;
         event = PressButtonEvent::HoldPress;
+      }
+    }
+  }
+  return event;
+}
+
+// Boot Button State
+enum class BootButtonEvent : uint8_t {
+  None = 0,
+  ShortPress,
+  LongPress,
+};
+BootButtonEvent checkBootButton(uint64_t nowMS) {
+  const uint8_t reading = static_cast<uint8_t>(digitalRead(Boot_Pin));
+  if (reading != Boot_Last_Reading) {
+    Boot_Last_Change_MS = nowMS;
+    Boot_Last_Reading = reading;
+  }
+  BootButtonEvent event = BootButtonEvent::None;
+  if ((nowMS - Boot_Last_Change_MS) >= Button_Debounce_MS) {
+    if (reading != Boot_Stable_State) {
+      Boot_Stable_State = reading;
+      if (Boot_Stable_State == LOW) {
+        Boot_Press_Start_MS = nowMS;
+        Boot_Long_Event_Fired = false;
+      } else {
+        const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
+        if (!Boot_Long_Event_Fired && heldMS <= Button_Short_MS) {
+          event = BootButtonEvent::ShortPress;
+        } else if (!Boot_Long_Event_Fired && heldMS >= Button_Long_MS) {
+          Boot_Long_Event_Fired = true;
+          event = BootButtonEvent::LongPress;
+        }
       }
     }
   }
@@ -449,22 +484,19 @@ void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
   prefs.end();
 }
 
-// Compass Calibration Button
-bool calibrationButtonPressed(uint64_t nowMS) {
-  const uint8_t reading = static_cast<uint8_t>(digitalRead(Boot_Pin));
-  if (reading != Boot_Last_Reading) {
-    Boot_Last_Change_MS = nowMS;
-    Boot_Last_Reading = reading;
+// Load demo state
+void loadDemoMode() {
+  if (prefs.begin(Settings_NVS_Namespace, true)) {
+    Demo_Mode = prefs.getBool(Demo_Mode_Key, false);
+    prefs.end();
   }
-  if ((nowMS - Boot_Last_Change_MS) >= Button_Debounce_MS) {
-    if (reading != Boot_Stable_State) {
-      Boot_Stable_State = reading;
-      if (Boot_Stable_State == LOW) {
-        return true;
-      }
-    }
-  }
-  return false;
+}
+
+// Save demo state
+void saveDemoMode() {
+  prefs.begin(Settings_NVS_Namespace, false);
+  prefs.putBool(Demo_Mode_Key, Demo_Mode);
+  prefs.end();
 }
 
 // Display Centre Text 
@@ -1133,6 +1165,7 @@ void setup() {
   display.fillScreen(ST77XX_BLACK);
 
   // MS5837 initialisation if not in demo mode
+  loadDemoMode();
   Simulated_Profile_Start_MS = millis();
   if (!Demo_Mode) {
     // Power MS5837
@@ -1247,7 +1280,7 @@ void setup() {
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
             updateStopwatch(nowMS);
-            // Button detection
+            // Press Button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
               // Long press toggles stopwatch
@@ -1277,10 +1310,24 @@ void setup() {
               // Short press sounds buzzer
               buzzer(nowMS);
             }
-            // Calibration button detection
-            if (calibrationButtonPressed(nowMS)) {
+            // Boot button detection
+            const BootButtonEvent bootEvent = checkBootButton(nowMS);
+            if (bootEvent == BootButtonEvent::LongPress) {
+              // Long press boot button to toggle demo mode
+              Demo_Mode = !Demo_Mode;
+              saveDemoMode();
+              if (Display_Task_Handle != nullptr) {
+                vTaskSuspend(Display_Task_Handle);
+              }
+              display.fillScreen(ST77XX_BLACK);
+              drawCentreText("Demo", 86, 4, ST77XX_CYAN);
+              drawCentreText(Demo_Mode ? "On" : "Off", 144, 4, ST77XX_CYAN);
+              delay(Message_MS);
+              digitalWrite(Power_Pin, LOW);
+            } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
-                // Power off when underwater
+                // Short press underwater powers off.
+                saveDemoMode();
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
@@ -1293,7 +1340,7 @@ void setup() {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
-                // Start compass calibration on surface
+                // Short press on surface starts compass calibration.
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Compass", 60, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 130, 4, ST77XX_WHITE);
@@ -1310,7 +1357,7 @@ void setup() {
                 drawCalibrationScore();
                 delay(Message_MS * 3);
                 display.fillScreen(ST77XX_BLACK);
-                esp_restart();  // Restart after calibration
+                digitalWrite(Power_Pin, LOW);
               }
             }
             // Compass
