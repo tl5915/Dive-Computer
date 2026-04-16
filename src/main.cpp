@@ -909,7 +909,7 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
 
 // Main Display
 void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, const DecoResult &deco) {
-  // Draw depth block on top-left
+  // Depth block on top-left
   const int32_t depthTenths = static_cast<int32_t>(Depth * 10.0f + ((Depth >= 0.0f) ? 0.5f : -0.5f));
   const int32_t depthTenthsAbs = (depthTenths >= 0) ? depthTenths : -depthTenths;
   const uint16_t depthInteger = static_cast<uint16_t>(depthTenthsAbs / 10);
@@ -965,7 +965,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setCursor(unitX, unitY);
   target.print(unitPart);
   target.drawFastHLine(0, depthBottom + 2, 280, ST77XX_BLUE);
-  // Draw battery indicator on top right
+  //Battery indicator on top right
   drawBatteryIndicator(target, Battery_Percentage);
   // Current GF below battery
   char gfStr[6];
@@ -978,16 +978,16 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
   target.setCursor(240, 36);
   target.print(gfStr);
-  // Draw timer below depth
+  // Timer below depth
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
   target.setTextSize(4);
   target.setTextColor(ST77XX_MAGENTA, Stopwatch_Active ? ST77XX_WHITE : ST77XX_BLACK);
   target.setCursor(0, 118);
   target.print(timerString);
-  // Draw heading right of timer
+  // Heading right of timer
   drawHeadingValue(target, 118, Heading);
-  // Draw Deco table below timer and heading
+  // Deco table below timer and heading
   target.drawFastHLine(0, 155, 280, ST77XX_BLUE);
   target.drawFastHLine(0, 198, 280, ST77XX_BLUE);
   target.drawFastVLine(0, 156, 42, ST77XX_BLUE);
@@ -1033,7 +1033,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   drawColCentreText(target, timeStr, 98, 36, 169, 2, ST77XX_WHITE);
   drawColCentreText(target, ttsStr, 166, 36, 169, 2, ST77XX_WHITE);
   drawColCentreText(target, sGfStr, 236, 36, 169, 2, surfGfColor);
-  // Draw compass banner at bottom
+  // Compass banner at bottom
   drawCompassBanner(target, Heading);
 }
 
