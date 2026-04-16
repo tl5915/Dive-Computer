@@ -81,10 +81,8 @@ constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
 
 // Buzzer Constants
-constexpr uint16_t Frequency_Low = 250;   // 250 Hz low tune
-constexpr uint16_t Frequency_High = 500;  // 500 Hz high tune
-constexpr uint8_t Horn_Duration_MS = 8;   // 8 ms per tone
-constexpr uint8_t Horn_Cycles = 30;       // 30 cycles
+constexpr uint16_t Buzzer_Frequency = 500;
+constexpr uint16_t Buzzer_Duration_MS = 1000;
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -208,6 +206,10 @@ uint64_t Button_Press_Start_MS = 0;
 bool Button_Long_Event_Fired = false;
 bool Button_Hold_Event_Fired = false;
 
+// Buzzer
+bool Buzzer_Active = false;
+uint64_t Buzzer_End_MS = 0;
+
 // Decompression
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_MS = 0;
@@ -305,15 +307,20 @@ PressButtonEvent checkButton(uint64_t nowMS) {
   return event;
 }
 
-// Horn: alternating dual tune
-void horn() {
-  for (int i = 0; i < Horn_Cycles; i++) {
-    tone(Buzz_Pin, Frequency_Low);
-    delay(Horn_Duration_MS);
-    tone(Buzz_Pin, Frequency_High);
-    delay(Horn_Duration_MS);
+// Buzzer
+void buzzer(uint64_t nowMS) {
+  tone(Buzz_Pin, Buzzer_Frequency);
+  Buzzer_End_MS = nowMS + Buzzer_Duration_MS;
+  Buzzer_Active = true;
+}
+void serviceBuzzer(uint64_t nowMS) {
+  if (!Buzzer_Active) {
+    return;
   }
-  noTone(Buzz_Pin);
+  if (nowMS >= Buzzer_End_MS) {
+    noTone(Buzz_Pin);
+    Buzzer_Active = false;
+  }
 }
 
 // Frame Buffer Management
@@ -982,7 +989,11 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
   target.setTextSize(4);
-  target.setTextColor(ST77XX_MAGENTA, Stopwatch_Active ? ST77XX_WHITE : ST77XX_BLACK);
+  if (Stopwatch_Active) {
+    target.setTextColor(ST77XX_GREEN, ST77XX_RED);
+  } else {
+    target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
+  }
   target.setCursor(0, 118);
   target.print(timerString);
   // Heading right of timer
@@ -1061,9 +1072,12 @@ void setup() {
   } else {
     USB_Powered = false;
   }
-  // Power conservation
+
+  // Buzzer
   pinMode(Buzz_Pin, OUTPUT);
   digitalWrite(Buzz_Pin, LOW);
+
+  // Power conservation
   esp_wifi_stop();
   esp_bt_controller_disable();
   esp_pm_config_esp32s3_t pm_config = {
@@ -1228,6 +1242,7 @@ void setup() {
         uint64_t lastDepthUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
+          serviceBuzzer(nowMS);
           // 100 Hz
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
@@ -1259,7 +1274,8 @@ void setup() {
                 digitalWrite(Power_Pin, LOW);
               }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
-              horn();
+              // Short press sounds buzzer
+              buzzer(nowMS);
             }
             // Calibration button detection
             if (calibrationButtonPressed(nowMS)) {
