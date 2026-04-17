@@ -3,7 +3,7 @@ import sys
 import os
 
 if len(sys.argv) < 3:
-    print("Usage: convert_to_rgb565.py input.png output.h")
+    print("Usage: convert_to_rgb565.py image.png image.h")
     sys.exit(1)
 
 inp = sys.argv[1]
@@ -44,7 +44,7 @@ with open(out, 'w') as f:
     f.write(f'// Image size: {width}x{height}, {len(flat_pixels)} pixels\n')
     f.write(f'constexpr uint16_t IMAGE_WIDTH = {width}u;\n')
     f.write(f'constexpr uint16_t IMAGE_HEIGHT = {height}u;\n\n')
-    f.write(f'const uint16_t image_rgb565[IMAGE_WIDTH * IMAGE_HEIGHT] PROGMEM = {{\n')
+    f.write(f'const uint16_t image[IMAGE_WIDTH * IMAGE_HEIGHT] PROGMEM = {{\n')
     for i, val in enumerate(flat_pixels):
         if i % 12 == 0:
             f.write('    ')
