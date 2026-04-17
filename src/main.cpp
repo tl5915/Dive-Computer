@@ -1377,7 +1377,6 @@ void setup() {
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
                 // Short press underwater to power off (shut down in case of MS5837 error)
-                saveDemoMode();
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
