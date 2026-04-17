@@ -21,6 +21,9 @@
 #include <magnetometer_calibration.h>
 // Demo dive profile
 #include "demo.h"
+// Image display
+#include <pgmspace.h>
+#include "image.h"
 
 // Pins
 constexpr uint8_t Boot_Pin = 0;
@@ -58,10 +61,10 @@ constexpr uint8_t QMC5883P_I2C_Address = 0x2C;
 constexpr uint8_t BH1750_I2C_Address = 0x23;
 
 // LCD Constants
-constexpr uint16_t LCD_Width = 260;
+constexpr uint16_t LCD_Width = 240;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen below 10% battery
-constexpr uint8_t Critical_Battery_Threshold = 1;  // Shut down below 1% battery
+constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen
+constexpr uint8_t Critical_Battery_Threshold = 0;  // Auto shut down
 constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
 constexpr float Ambient_Lux_Max = 40000.0f;        // Lux level at high backlight
 constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
@@ -718,22 +721,22 @@ void drawCalibrationDiagnostics(bool calibration_ok) {
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
-  display.setCursor(20, 70);
+  display.setCursor(20, 60);
   display.print("Method: ");
   display.print(compassCalibrationMethodText(Last_Calibration_Method));
-  display.setCursor(20, 100);
+  display.setCursor(20, 90);
   display.print("Reason: ");
   display.print(calibrationFailReasonText(Last_Calibration_Fail_Reason));
-  display.setCursor(20, 130);
+  display.setCursor(20, 120);
   display.print("Samples: ");
   display.print(static_cast<unsigned int>(Last_Calibration_Sample_Count));
-  display.setCursor(20, 160);
+  display.setCursor(20, 150);
   display.print("Rate Hz: ");
   display.print(sample_rate_hz, 1);
-  display.setCursor(20, 190);
+  display.setCursor(20, 180);
   display.print("Time ms: ");
   display.print(static_cast<unsigned long>(Last_Calibration_Elapsed_MS));
-  display.setCursor(20, 220);
+  display.setCursor(20, 210);
   display.print("Quality: ");
   display.print(Last_Calibration_Quality.is_valid ? "Valid" : "Invalid");
 }
@@ -742,7 +745,7 @@ void drawCalibrationDiagnostics(bool calibration_ok) {
 void drawCalibrationScore() {
   display.fillScreen(ST77XX_BLACK);
   if (!Last_Calibration_Quality.is_valid) {
-    drawCentreText("N/A", 20, 220, ST77XX_RED);
+    drawCentreText("N/A", 20, 3, ST77XX_RED);
     return;
   }
   // Score percentage colour
@@ -861,8 +864,8 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
   constexpr int16_t outlineW = 40;
   constexpr int16_t outlineH = 14;
   constexpr int16_t padding = 3;
-  const int16_t outlineX = 216;
-  const int16_t outlineY = 16;
+  const int16_t outlineX = 212;
+  const int16_t outlineY = 4;
   const int16_t fillWidth = map(percentage, 0, 100, 0, outlineW - (padding * 2));
   target.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
   target.drawRect(outlineX, outlineY, outlineW, outlineH, ST77XX_WHITE);
@@ -1015,7 +1018,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   }
   target.setTextSize(1);
   target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
-  target.setCursor(240, 36);
+  target.setCursor(240, 24);
   target.print(gfStr);
   // Timer below depth
   char timerString[8];
@@ -1080,13 +1083,35 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   drawCompassBanner(target, Heading);
 }
 
+  // Show Image
+  void showImage() {
+    const uint16_t w = 280;
+    const uint16_t h = 240;
+    const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+    uint16_t *buf = static_cast<uint16_t *>(heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (buf == nullptr) {
+      buf = static_cast<uint16_t *>(malloc(pixels * sizeof(uint16_t)));
+    }
+    if (buf == nullptr) return;
+    for (size_t i = 0; i < pixels; ++i) {
+      buf[i] = pgm_read_word(&image[i]);
+    }
+    display.startWrite();
+    display.setAddrWindow(0, 0, w, h);
+    display.writePixels(buf, static_cast<uint32_t>(pixels), true, false);
+    display.endWrite();
+    free(buf);
+  }
+
 
 void setup() {
   // Power on
   pinMode(Button_Pin, INPUT);
   pinMode(Boot_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
+  pinMode(Backlight_Pin, OUTPUT);
   digitalWrite(Power_Pin, HIGH);
+  digitalWrite(Backlight_Pin, LOW);
   delay(10);
   bool buttonHeld = true;
   const uint32_t Boot_Time_MS = millis();
@@ -1126,14 +1151,13 @@ void setup() {
 
   // Display initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
-  pinMode(Backlight_Pin, OUTPUT);
-  analogWrite(Backlight_Pin, Backlight_High);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setSPISpeed(40000000); 
   display.setRotation(1);
 
-  // Charging screen
+  // Initial screen
   display.fillScreen(ST77XX_BLACK);
+  analogWrite(Backlight_Pin, Backlight_High);
   if (USB_Powered) {
     drawCentreText("Charging", 50, 5, ST77XX_GREEN);
     uint32_t lastUpdate = 0;
@@ -1157,10 +1181,8 @@ void setup() {
       delay(50);
     }
   }
-
-  // Initial screen
-  drawCentreText("Pre-Dive", 86, 4, ST77XX_CYAN);
-  drawCentreText("Checks", 144, 4, ST77XX_CYAN);
+  // Show startup image
+  showImage();
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -1301,9 +1323,10 @@ void setup() {
                   vTaskSuspend(Display_Task_Handle);
                 }
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Power", 86, 4, ST77XX_CYAN);
-                drawCentreText("Off", 144, 4, ST77XX_CYAN);
+                drawCentreText("Power", 75, 4, ST77XX_CYAN);
+                drawCentreText("Off", 135, 4, ST77XX_CYAN);
                 delay(Message_MS);
+                display.fillScreen(ST77XX_BLACK);
                 digitalWrite(Power_Pin, LOW);
               }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
@@ -1320,8 +1343,8 @@ void setup() {
                 vTaskSuspend(Display_Task_Handle);
               }
               display.fillScreen(ST77XX_BLACK);
-              drawCentreText("Demo", 86, 4, ST77XX_CYAN);
-              drawCentreText(Demo_Mode ? "On" : "Off", 144, 4, ST77XX_CYAN);
+              drawCentreText("Demo", 75, 4, ST77XX_CYAN);
+              drawCentreText(Demo_Mode ? "On" : "Off", 135, 4, ST77XX_CYAN);
               delay(Message_MS);
               digitalWrite(Power_Pin, LOW);
             } else if (bootEvent == BootButtonEvent::ShortPress) {
@@ -1332,9 +1355,10 @@ void setup() {
                   vTaskSuspend(Display_Task_Handle);
                 }
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Power", 86, 4, ST77XX_CYAN);
-                drawCentreText("Off", 144, 4, ST77XX_CYAN);
+                drawCentreText("Power", 75, 4, ST77XX_CYAN);
+                drawCentreText("Off", 135, 4, ST77XX_CYAN);
                 delay(Message_MS);
+                display.fillScreen(ST77XX_BLACK);
                 digitalWrite(Power_Pin, LOW);
               } else {
                 if (Display_Task_Handle != nullptr) {
@@ -1342,15 +1366,15 @@ void setup() {
                 }
                 // Short press on surface starts compass calibration.
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Compass", 60, 4, ST77XX_WHITE);
-                drawCentreText("Calibration", 130, 4, ST77XX_WHITE);
+                drawCentreText("Compass", 75, 4, ST77XX_WHITE);
+                drawCentreText("Calibration", 135, 4, ST77XX_WHITE);
                 delay(Calibration_Delay_MS);
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Calibrating", 98, 4, ST77XX_CYAN);
+                drawCentreText("Calibrating", 104, 4, ST77XX_CYAN);
                 std::vector<float> mag_samples_xyz;
                 collectCompassSamples(mag_samples_xyz);
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Computing", 98, 4, ST77XX_YELLOW);
+                drawCentreText("Computing", 104, 4, ST77XX_YELLOW);
                 const bool calibration_ok = computeCompassCalibration(mag_samples_xyz);
                 drawCalibrationDiagnostics(calibration_ok);
                 delay(Message_MS * 3);
@@ -1391,13 +1415,13 @@ void setup() {
             // Backlight and battery
             Ambient_Lux = lightMeter.readLightLevel();
             Battery_Percentage = readBatteryPercentage();
-            if (Battery_Percentage < Low_Battery_Threshold) {
+            if (Battery_Percentage <= Low_Battery_Threshold) {
               Backlight_Level = Backlight_Low;
             } else {
               Backlight_Level = ambientBacklightLevel(Ambient_Lux);
             }
             analogWrite(Backlight_Pin, Backlight_Level);
-            if (Battery_Percentage < Critical_Battery_Threshold) {
+            if (Battery_Percentage <= Critical_Battery_Threshold) {
               if (Display_Task_Handle != nullptr) {
                 vTaskSuspend(Display_Task_Handle);
               }
@@ -1405,6 +1429,7 @@ void setup() {
               drawCentreText("Battery", 86, 4, ST77XX_RED);
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
+              display.fillScreen(ST77XX_BLACK);
               digitalWrite(Power_Pin, LOW);
             }
             // 0.2 Hz: ZHL-16C
