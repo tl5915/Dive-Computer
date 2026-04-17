@@ -19,11 +19,11 @@
 #include <ZHL16C.h>
 #include <Adafruit_AHRS.h>
 #include <magnetometer_calibration.h>
-// Demo dive profile
-#include "demo.h"
-// Image display
+// Header Files
 #include <pgmspace.h>
+#include "demo.h"
 #include "image.h"
+#include "compass_label.h"
 
 // Pins
 constexpr uint8_t Boot_Pin = 0;
@@ -40,11 +40,14 @@ constexpr uint8_t Sensor_VCC_Pin = 3;
 constexpr uint8_t Sensor_GND_Pin = 16;
 constexpr uint8_t Sensor_SCL_Pin = 17;
 constexpr uint8_t Sensor_SDA_Pin = 18;
+constexpr uint8_t QMI_INT_Pin = 38;
 constexpr uint8_t Button_Pin = 40;
 constexpr uint8_t Power_Pin = 41;
 constexpr uint8_t Buzz_Pin = 42;
+constexpr uint8_t U0TXD_Pin = 43;
+constexpr uint8_t U0RXD_Pin = 44;
 
-// Define Objects
+// Objects
 SPIClass spi(FSPI);
 Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
 Preferences prefs;
@@ -59,17 +62,18 @@ Adafruit_Madgwick ahrs;
 constexpr uint8_t QMI8658_I2C_Address = 0x6B;
 constexpr uint8_t QMC5883P_I2C_Address = 0x2C;
 constexpr uint8_t BH1750_I2C_Address = 0x23;
+constexpr uint8_t MS5837_I2C_Address = 0x76;
 
 // LCD Constants
 constexpr uint16_t LCD_Width = 240;
 constexpr uint16_t LCD_Height = 280;
-constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen
-constexpr uint8_t Critical_Battery_Threshold = 0;  // Auto shut down
+constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen at 10%
+constexpr uint8_t Critical_Battery_Threshold = 0;  // Auto shut down at 0%
 constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
-constexpr float Ambient_Lux_Max = 40000.0f;        // Lux level at high backlight
-constexpr uint8_t Backlight_Low = 8;               // Low backlight in dark surroundings
-constexpr uint8_t Backlight_High = 255;            // High backlight in bright surroundings
-constexpr uint32_t Message_MS = 5000;              // Display messages for 5 seconds
+constexpr float Ambient_Lux_Max = 40000.0f;        // Lux at high backlight
+constexpr uint8_t Backlight_Low = 8;               // Low backlight
+constexpr uint8_t Backlight_High = 255;            // High backlight
+constexpr uint32_t Message_MS = 3000;              // Display messages for 3 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
 constexpr uint32_t Button_Update_MS = 10;          // Button checks and compass: 100 Hz
 constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
@@ -83,8 +87,8 @@ constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
 
 // Buzzer Constants
-constexpr uint16_t Buzzer_Frequency = 3800;
-constexpr uint16_t Buzzer_Duration_MS = 500;
+constexpr uint16_t Buzzer_Frequency = 3800;   // 3.8 kHz resonant frequency
+constexpr uint16_t Buzzer_Duration_MS = 500;  // 0.5 second buzz
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -93,14 +97,14 @@ constexpr float Depth_Offset = 0.2f;      // Sea level offset 0.2 m
 constexpr float Dive_Start_Depth = 1.0f;  // Start timer at 1 m
 
 // ZHL-16C Constants
-constexpr uint8_t GF_Low = 60;
-constexpr uint8_t GF_High = 85;
-constexpr float Setpoint = 1.2f;
+constexpr uint8_t GF_Low = 60;    // Gradient factor low
+constexpr uint8_t GF_High = 85;   // Gradient factor high
+constexpr float Setpoint = 1.2f;  // CCR setpoint
 
-// IMU Constants
-constexpr float Accel_Offset_X = 0.093489f;
-constexpr float Accel_Offset_Y = -0.051529f;
-constexpr float Accel_Offset_Z = 0.034036f;
+// IMU Offset Constants
+constexpr float Accel_Offset_X = 0.0;
+constexpr float Accel_Offset_Y = 0.0f;
+constexpr float Accel_Offset_Z = 0.0f;
 constexpr float Gyro_Offset_X = 0.4791f;
 constexpr float Gyro_Offset_Y = 5.7993f;
 constexpr float Gyro_Offset_Z = -0.7015f;
@@ -136,33 +140,14 @@ constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
   .is_valid = true
 };
 
-// Compass labels
-struct CompassLabel {
-  int degrees;
-  const char *label;
-  uint8_t textSize;
-};
-const CompassLabel Compass_Labels[] = {
-    {0,   "N",  3},
-    {45,  "NE", 2},
-    {90,  "E",  3},
-    {135, "SE", 2},
-    {180, "S",  3},
-    {225, "SW", 2},
-    {270, "W",  3},
-    {315, "NW", 2},
-  };
-
 // Battery Percentage Lookup Table
 constexpr float Voltage_Table[] = {
-    3.27f, 3.61f, 3.69f, 3.71f, 3.73f, 3.75f, 3.77f, 3.79f, 3.80f, 3.82f, 3.84f,
-    3.85f, 3.87f, 3.91f, 3.95f, 3.98f, 4.02f, 4.08f, 4.11f, 4.15f, 4.20f};
+    3.27f, 3.61f, 3.69f, 3.71f, 3.73f, 3.75f, 3.77f, 3.79f, 3.80f, 3.82f, 3.84f, 3.85f, 3.87f, 3.91f, 3.95f, 3.98f, 4.02f, 4.08f, 4.11f, 4.15f, 4.20f};
 constexpr uint8_t Percentage_Table[] = {
-    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
-    55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
-// RTOS
+// RTOS Variables
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
 GFXcanvas16 *Frame_Canvas = nullptr;
@@ -177,7 +162,7 @@ bool Frame_Have_Previous = false;
 bool Demo_Mode = false;
 bool ripNtear_Mode = false;
 
-// Dive metrics
+// Dive Variables
 float Heading = 0.0f;
 float Depth = 0.0f;
 int Minutes = 0;
@@ -191,14 +176,14 @@ bool Dive_Timer_Started = false;
 bool Stopwatch_Active = false;
 bool sensorAvailable = false;
 
-// Battery
+// Battery Variables
 float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
 bool USB_Powered = false;
 
-// Press button
+// Press Button Variables
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
@@ -206,22 +191,67 @@ uint64_t Button_Press_Start_MS = 0;
 bool Button_Long_Event_Fired = false;
 bool Button_Hold_Event_Fired = false;
 
-// Boot button
+// Boot Button Variables
 uint8_t Boot_Last_Reading = HIGH;
 uint8_t Boot_Stable_State = HIGH;
 uint64_t Boot_Last_Change_MS = 0;
 uint64_t Boot_Press_Start_MS = 0;
 bool Boot_Long_Event_Fired = false;
 
-// Buzzer
+// Buzzer Variables
 bool Buzzer_Active = false;
 uint64_t Buzzer_End_MS = 0;
 
-// Decompression
+// Decompression Variables
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
 uint64_t Deco_Last_Update_MS = 0;
 
-// Compass calibration
+// Compass Labels
+float projectCompassX3D(float x, float centerX, float width) {
+  constexpr float Projection_Exponent = 2.1f;
+  if (x <= centerX) {
+    const float t = constrain(x / centerX, 0.0f, 1.0f);
+    return powf(t, Projection_Exponent) * centerX;
+  }
+  const float rightSpan = width - centerX;
+  const float t = constrain((width - x) / rightSpan, 0.0f, 1.0f);
+  return (centerX - (powf(t, Projection_Exponent) * centerX)) + centerX;
+}
+float smoothstep01(float t) {
+  t = constrain(t, 0.0f, 1.0f);
+  return t * t * (3.0f - (2.0f * t));
+}
+float compassCenterWeight(float projectedX, float centerX) {
+  const float maxDist = centerX;
+  const float dist = fabsf(projectedX - centerX);
+  const float linearWeight = 1.0f - constrain(dist / maxDist, 0.0f, 1.0f);
+  return smoothstep01(linearWeight);
+}
+void drawScaledXBitmap(Adafruit_GFX &target, int16_t x, int16_t y, uint8_t srcW, uint8_t srcH, const uint8_t *bitmap, float scale, uint16_t color) {
+  if (bitmap == nullptr || scale <= 0.0f) {
+    return;
+  }
+  const int16_t dstW = static_cast<int16_t>(srcW * scale + 0.5f);
+  const int16_t dstH = static_cast<int16_t>(srcH * scale + 0.5f);
+  if (dstW <= 0 || dstH <= 0) {
+    return;
+  }
+  const uint8_t bytesPerRow = static_cast<uint8_t>((srcW + 7) / 8);
+  for (int16_t dy = 0; dy < dstH; ++dy) {
+    const uint8_t sy = static_cast<uint8_t>((static_cast<int32_t>(dy) * srcH) / dstH);
+    for (int16_t dx = 0; dx < dstW; ++dx) {
+      const uint8_t sx = static_cast<uint8_t>((static_cast<int32_t>(dx) * srcW) / dstW);
+      const uint16_t byteIndex = static_cast<uint16_t>(sy * bytesPerRow + (sx / 8));
+      const uint8_t rowByte = pgm_read_byte(bitmap + byteIndex);
+      const bool isSet = (rowByte & (1U << (sx & 7))) != 0;
+      if (isSet) {
+        target.drawPixel(x + dx, y + dy, color);
+      }
+    }
+  }
+}
+
+// Compass Calibration Method and Quality
 CompassCalibrationMatrices Compass_Matrices = {};
 enum class CompassCalibrationMethod : uint8_t {
   None = 0,
@@ -439,7 +469,7 @@ void flushDirtyRectFromPSRAM() {
   Frame_Have_Previous = true;
 }
 
-// Load Calibration
+// Load Compass Calibration Values
 bool loadCompassCalibrationFromNVS() {
   if (!prefs.begin(Compass_NVS_Namespace, true)) {
     return false;
@@ -471,7 +501,7 @@ bool loadCompassCalibrationFromNVS() {
   return compassSetCalibrationMatrices(&Compass_Matrices);
 }
 
-// Save Calibration
+// Save Compass Calibration Values
 void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
   if (!prefs.begin(Compass_NVS_Namespace, false)) {
     return;
@@ -487,7 +517,7 @@ void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
   prefs.end();
 }
 
-// Load demo state
+// Load Demo Mode State
 void loadDemoMode() {
   if (prefs.begin(Settings_NVS_Namespace, true)) {
     Demo_Mode = prefs.getBool(Demo_Mode_Key, false);
@@ -495,7 +525,7 @@ void loadDemoMode() {
   }
 }
 
-// Save demo state
+// Save Demo Mode State
 void saveDemoMode() {
   prefs.begin(Settings_NVS_Namespace, false);
   prefs.putBool(Demo_Mode_Key, Demo_Mode);
@@ -541,7 +571,7 @@ uint8_t ambientBacklightLevel(float lux) {
   return static_cast<uint8_t>(Backlight_Low + normalised * static_cast<float>(Backlight_High - Backlight_Low));
 }
 
-// Read Gyroscope
+// Read Gyroscope and Map to Body Frame
 void readGyroTransformed(float out_gyro[3]) {
   float gx = 0.0f;
   float gy = 0.0f;
@@ -555,7 +585,7 @@ void readGyroTransformed(float out_gyro[3]) {
   out_gyro[2] = -gz;  // Forward = -QMI_Z
 }
 
-// Read Accelerometer
+// Read Accelerometer and Map to Body Frame
 void readAccelTransformed(float out_accel[3]) {
   float ax = 0.0f;
   float ay = 0.0f;
@@ -566,35 +596,31 @@ void readAccelTransformed(float out_accel[3]) {
   az -= Accel_Offset_Z;
   out_accel[0] = ax;   // Right = QMI_X
   out_accel[1] = -ay;  // Down = -QMI_Y
-  out_accel[2] = -az;   // Forward = QMI_Z
+  out_accel[2] = -az;  // Forward = QMI_Z
 }
 
-// Read Magnetometer
+// Read Magnetometer and Map to Body Frame
 void readMagTransformed(float out_mag[3]) {
   MagnetometerData mag_data = {};
   qmc.readData(mag_data);
   float mx = static_cast<float>(mag_data.raw.x);
   float my = static_cast<float>(mag_data.raw.y);
   float mz = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -mx;   // Right = -QMC_X
-  out_mag[1] = -my;   // Down = -QMC_Y
-  out_mag[2] = -mz;   // Forward = -QMC_Z
+  out_mag[0] = -mx;  // Right = -QMC_X
+  out_mag[1] = -my;  // Down = -QMC_Y
+  out_mag[2] = -mz;  // Forward = -QMC_Z
 }
 
 // Read Compass Heading
 float readCompassHeading() {
-  // Raw accelerometer data
   float accel_body[3] = {0.0f, 0.0f, 0.0f};
-  readAccelTransformed(accel_body);
-  // Raw gyroscope data
+  readAccelTransformed(accel_body);  // Calibrated accelerometer data
   float gyro_body[3]  = {0.0f, 0.0f, 0.0f};
-  readGyroTransformed(gyro_body);
-  // Calibrated magnetometer data
+  readGyroTransformed(gyro_body);  // Calibrated gyroscope data
   float raw_mag_body[3] = {0.0f, 0.0f, 0.0f};
   float cal_mag_body[3] = {0.0f, 0.0f, 0.0f};
   readMagTransformed(raw_mag_body);
-  compassApplyCalibration(raw_mag_body, cal_mag_body);
-  // Map body frame to AHRS frame, yaw is heading down
+  compassApplyCalibration(raw_mag_body, cal_mag_body);  // Calibrated magnetometer data
   const float ax = accel_body[2];
   const float ay = accel_body[0];
   const float az = accel_body[1];
@@ -604,10 +630,10 @@ float readCompassHeading() {
   const float mx = cal_mag_body[2];
   const float my = cal_mag_body[0];
   const float mz = cal_mag_body[1];
-  ahrs.update(gx, gy, gz, ax, ay, az, mx, my, mz);
-  float heading = ahrs.getYaw();
+  ahrs.update(gx, gy, gz, ax, ay, az, mx, my, mz);  // Map body frame to AHRS frame
+  float heading = ahrs.getYaw();  // Yaw is heading down
   if (heading < 0.0f) heading += 360.0f;
-  heading = 180.0f - heading - Compass_Offset;
+  heading = 180.0f - heading - Compass_Offset;  // E/W flip and compass offset
   if (heading < 0.0f) heading += 360.0f;
   return heading;
 }
@@ -651,11 +677,7 @@ bool computeCompassCalibration(const std::vector<float>& mag_samples_xyz) {
   }
   CompassCalibrationMatrices fitted = {};
   CompassCalibrationFitMethod fit_method = CompassCalibrationFitMethod::Error;
-  if (!compassCalibrateFromSamplesWithFallback(
-          mag_samples_xyz.data(),
-          sample_count,
-          &fitted,
-          &fit_method)) {
+  if (!compassCalibrateFromSamplesWithFallback(mag_samples_xyz.data(), sample_count, &fitted, &fit_method)) {
     Last_Calibration_Method = CompassCalibrationMethod::Error;
     Last_Calibration_Fail_Reason = CalibrationFailReason::FitFailed;
     return false;
@@ -705,8 +727,7 @@ void drawCalibrationDiagnostics(bool calibration_ok) {
   display.fillScreen(ST77XX_BLACK);
   float sample_rate_hz = 0.0f;
   if (Last_Calibration_Elapsed_MS > 0) {
-    sample_rate_hz = (1000.0f * static_cast<float>(Last_Calibration_Sample_Count)) /
-                     static_cast<float>(Last_Calibration_Elapsed_MS);
+    sample_rate_hz = (1000.0f * static_cast<float>(Last_Calibration_Sample_Count)) / static_cast<float>(Last_Calibration_Elapsed_MS);
   }
   display.setTextColor(ST77XX_WHITE);
   uint16_t state_colour;
@@ -827,9 +848,9 @@ void stopAndResetStopwatch() {
   Stopwatch_Seconds = 0;
 }
 
-// Battery Voltage
+// Battery Percentage
 uint8_t readBatteryPercentage() {
-  constexpr uint8_t sampleCount = 16;
+  constexpr uint8_t sampleCount = 16;  // Oversampling
   uint32_t millivoltSum = 0;
   for (uint8_t i = 0; i < sampleCount; ++i) {
     millivoltSum += analogReadMilliVolts(Battery_Pin);
@@ -845,9 +866,7 @@ uint8_t readBatteryPercentage() {
     float lower = Voltage_Table[i];
     float upper = Voltage_Table[i + 1];
     if (voltage < upper) {
-      return ((voltage - lower) < (upper - voltage))
-                 ? Percentage_Table[i]
-                 : Percentage_Table[i + 1];
+      return ((voltage - lower) < (upper - voltage)) ? Percentage_Table[i] : Percentage_Table[i + 1];
     }
   }
   return 0;
@@ -864,7 +883,7 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
   constexpr int16_t outlineW = 40;
   constexpr int16_t outlineH = 14;
   constexpr int16_t padding = 3;
-  const int16_t outlineX = 212;
+  const int16_t outlineX = 212;  // Top-right corner avoiding rounded edge
   const int16_t outlineY = 4;
   const int16_t fillWidth = map(percentage, 0, 100, 0, outlineW - (padding * 2));
   target.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
@@ -882,30 +901,34 @@ void drawHeadingValue(Adafruit_GFX &target, int16_t y, float direction) {
   char headingString[4];
   snprintf(headingString, sizeof(headingString), "%03u", heading);
   target.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
-  target.setTextSize(3);
-  target.setCursor(172, y + 4);
-  target.print("-");
-  target.setCursor(262, y + 4);
-  target.print("-");
   target.setTextSize(4);
-  target.setCursor(190, y);
+  target.setCursor(190, y);  // Allign right edge
   target.print(headingString);
+  target.setTextSize(2);
+  target.cp437(true);
+  target.write(248);  // Degree symbol
 }
 
 // Compass Block
 void drawCompassBanner(Adafruit_GFX &target, float direction) {
-  const int16_t centerX = 140;
+  const int16_t bannerWidth = static_cast<int16_t>(target.width());
+  const int16_t centerX = bannerWidth / 2;
   const int16_t compassY = 202;
+  const int16_t labelBaseY = 216;
+  const float majorLabelScale = 2.0f;
+  const float minorLabelScale = majorLabelScale;
   target.setTextWrap(false);
-  target.fillRect(0, compassY + 12, 280, 37, ST77XX_BLACK);
-  target.drawFastHLine(0, 201, 280, ST77XX_WHITE);
-  target.fillTriangle(136, 203, 144, 203, 140, 212, ST77XX_CYAN);
-  target.drawLine(140, 212, 140, 239, ST77XX_CYAN);
-  const float pixelsPerDegree = 280.0f / 180.0f;
-  const int16_t majorTickBottomY = compassY + 10;
-  const int16_t minorTickBottomY = compassY + 5;
-  for (int tickDegrees = 45; tickDegrees < 360; tickDegrees += 90) {
-    float delta = static_cast<float>(tickDegrees) - direction;
+  target.fillRect(0, compassY + 12, bannerWidth, 37, ST77XX_BLACK);  // Tick and label area
+  target.drawFastHLine(0, 200, 280, ST77XX_WHITE);  // Thick upper line
+  target.drawFastHLine(0, 201, 280, ST77XX_WHITE);  // Thick upper line
+  target.fillTriangle(centerX - 4, 203, centerX + 4, 203, centerX, 212, ST77XX_CYAN);  // Heading indicator arrow
+  target.drawLine(centerX, 212, centerX, 239, ST77XX_CYAN);  // Heading indicator line
+  const float pixelsPerDegree = static_cast<float>(bannerWidth) / 180.0f;
+  const int16_t majorTickBottomY = compassY + 10;  // Major tick 10 pixels high
+  const int16_t minorTickBottomY = compassY + 6;   // Minor tick 6 pixels high
+  const int16_t microTickBottomY = compassY + 4;   // Micro tick 4 pixels high
+  for (uint8_t step = 1; step < 16; step += 2) {
+    float delta = (22.5f * static_cast<float>(step)) - direction;
     if (delta > 180.0f) {
       delta -= 360.0f;
     }
@@ -915,13 +938,15 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
     if (delta < -90.0f || delta > 90.0f) {
       continue;
     }
-    const int16_t tickX = centerX + static_cast<int16_t>(delta * pixelsPerDegree);
-    if (tickX < 0 || tickX >= 280) {
+    const float linearX = static_cast<float>(centerX) + (delta * pixelsPerDegree);
+    const float projectedX = projectCompassX3D(linearX, static_cast<float>(centerX), static_cast<float>(bannerWidth));
+    const int16_t tickX = static_cast<int16_t>(projectedX + 0.5f);
+    if (tickX < 0 || tickX >= bannerWidth) {
       continue;
     }
-    target.drawLine(tickX, compassY + 1, tickX, minorTickBottomY, ST77XX_WHITE);
+    target.drawLine(tickX, compassY + 1, tickX, microTickBottomY, ST77XX_WHITE);  // Projected micro ticks
   }
-  for (const CompassLabel &marker : Compass_Labels) {
+  for (const CompassLabelBitmapSet &marker : Compass_Label_Bitmaps) {
     float delta = static_cast<float>(marker.degrees) - direction;
     if (delta > 180.0f) {
       delta -= 360.0f;
@@ -929,29 +954,41 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
     if (delta < -180.0f) {
       delta += 360.0f;
     }
-    if (delta < -60.0f || delta > 60.0f) {
+    if (delta < -90.0f || delta > 90.0f) {
       continue;
     }
-    const int16_t tickX = centerX + static_cast<int16_t>(delta * pixelsPerDegree);
-    if (tickX < 0 || tickX >= 280) {
+    const float linearX = static_cast<float>(centerX) + (delta * pixelsPerDegree);
+    const float projectedX = projectCompassX3D(linearX, static_cast<float>(centerX), static_cast<float>(bannerWidth));
+    const int16_t tickX = static_cast<int16_t>(projectedX + 0.5f);
+    if (tickX < 0 || tickX >= bannerWidth) {
       continue;
     }
-    int16_t x1 = 0;
-    int16_t y1 = 0;
-    uint16_t labelW = 0;
-    uint16_t labelH = 0;
-    target.setTextSize(marker.textSize);
-    target.getTextBounds(marker.label, 0, 0, &x1, &y1, &labelW, &labelH);
-    target.drawLine(tickX, compassY + 1, tickX, majorTickBottomY, ST77XX_WHITE);
-    target.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-    target.setCursor(tickX - static_cast<int16_t>(labelW / 2), 218);
-    target.print(marker.label);
+    const bool majorTick = (marker.degrees % 90) == 0;
+    target.drawLine(tickX, compassY + 1, tickX, majorTick ? majorTickBottomY : minorTickBottomY, ST77XX_WHITE);  // Projected micro ticks
+    if (majorTick) {
+      target.drawLine(tickX - 1, compassY + 1, tickX - 1, majorTickBottomY, ST77XX_WHITE);  // Projected major ticks
+    }
+    const float centerWeight = compassCenterWeight(projectedX, static_cast<float>(centerX));
+    uint8_t labelVariant = static_cast<uint8_t>(centerWeight * static_cast<float>(Compass_Label_Bitmap_Variant_Count - 1) + 0.5f);
+    if (labelVariant >= Compass_Label_Bitmap_Variant_Count) {
+      labelVariant = Compass_Label_Bitmap_Variant_Count - 1;
+    }
+    const float scale = majorTick ? majorLabelScale : minorLabelScale;
+    const int16_t labelW = static_cast<int16_t>(Compass_Label_Bitmap_Width * scale + 0.5f);
+    const int16_t labelH = static_cast<int16_t>(Compass_Label_Bitmap_Height * scale + 0.5f);
+    const int16_t labelX = tickX - (labelW / 2);
+    const int16_t labelY = labelBaseY;
+    if (labelX < -labelW || labelX >= bannerWidth || labelY + labelH < compassY + 12 || labelY > compassY + 48) {
+      continue;
+    }
+    const uint8_t *labelBitmap = marker.variants[labelVariant];
+    drawScaledXBitmap(target, labelX, labelY, Compass_Label_Bitmap_Width, Compass_Label_Bitmap_Height, labelBitmap, scale, ST77XX_WHITE);  // Projected labels
   }
 }
 
 // Main Display
 void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, const DecoResult &deco) {
-  // Depth block on top-left
+  // Depth block at top-left
   const int32_t depthTenths = static_cast<int32_t>(Depth * 10.0f + ((Depth >= 0.0f) ? 0.5f : -0.5f));
   const int32_t depthTenthsAbs = (depthTenths >= 0) ? depthTenths : -depthTenths;
   const uint16_t depthInteger = static_cast<uint16_t>(depthTenthsAbs / 10);
@@ -983,7 +1020,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
   target.setTextSize(dotSize);
   target.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
-  const int16_t depthX = 16;
+  const int16_t depthX = 16;  // Top-left avoiding rounded edge
   const int16_t depthY = 12;
   const int16_t depthBottom = depthY + static_cast<int16_t>(integerH);
   const int16_t dotX = depthX + static_cast<int16_t>(integerW) + 2;
@@ -1006,8 +1043,8 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextSize(decimalSize);
   target.setCursor(unitX, unitY);
   target.print(unitPart);
-  target.drawFastHLine(0, depthBottom + 2, 280, ST77XX_BLUE);
-  //Battery indicator on top right
+  target.drawFastHLine(0, depthBottom + 2, 280, ST77XX_BLUE);  // Depth - Time/Heading seperator
+  //Battery indicator at top-right
   drawBatteryIndicator(target, Battery_Percentage);
   // Current GF below battery
   char gfStr[6];
@@ -1020,27 +1057,30 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
   target.setCursor(240, 24);
   target.print(gfStr);
-  // Timer below depth
+  // Timer at middle-left
   char timerString[8];
   snprintf(timerString, sizeof(timerString), "%3u:%02u", Minutes, Seconds);
   target.setTextSize(4);
   if (Stopwatch_Active) {
-    target.setTextColor(ST77XX_GREEN, ST77XX_RED);
+    target.setTextColor(ST77XX_GREEN, ST77XX_RED);  // Red background for stopwatch
+    target.fillRect(0, 115, 144, 3, ST77XX_RED);  // Top padding
+    target.fillRect(144, 115, 16, 35, ST77XX_RED); // Right padding
   } else {
     target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
   }
   target.setCursor(0, 118);
   target.print(timerString);
-  // Heading right of timer
+  target.drawFastVLine(166, depthBottom + 3, 44, ST77XX_BLUE);  // Time - Heading seperator
+  // Heading at middle-right
   drawHeadingValue(target, 118, Heading);
-  // Deco table below timer and heading
-  target.drawFastHLine(0, 155, 280, ST77XX_BLUE);
-  target.drawFastHLine(0, 198, 280, ST77XX_BLUE);
-  target.drawFastVLine(0, 156, 42, ST77XX_BLUE);
-  target.drawFastVLine(70, 156, 42, ST77XX_BLUE);
-  target.drawFastVLine(140, 156, 42, ST77XX_BLUE);
-  target.drawFastVLine(210, 156, 42, ST77XX_BLUE);
-  target.drawFastVLine(279, 156, 42, ST77XX_BLUE);
+  // Deco table below between Timer/Heading and Compass
+  target.drawFastHLine(0, 155, 280, ST77XX_BLUE);  // Top line
+  target.drawFastHLine(0, 196, 280, ST77XX_BLUE);  // Bottom line
+  target.drawFastVLine(0, 156, 40, ST77XX_BLUE);  // Left edge
+  target.drawFastVLine(70, 156, 40, ST77XX_BLUE);  // Column 1/2
+  target.drawFastVLine(140, 156, 40, ST77XX_BLUE);  // Column 2/3
+  target.drawFastVLine(210, 156, 40, ST77XX_BLUE);  // Column 3/4
+  target.drawFastVLine(279, 156, 40, ST77XX_BLUE);  // Right edge
   constexpr int16_t leftColX = 1;
   constexpr int16_t rightColX = 141;
   constexpr int16_t cellW = 68;
@@ -1048,18 +1088,18 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextSize(2);
   target.setTextColor(ST77XX_CYAN);
   target.setCursor(8, 169);
-  target.print("D");
+  target.print("D");  // Depth
   target.setCursor(78, 169);
-  target.print("S");
+  target.print("S");  // Stop
   target.setTextSize(1);
   target.setCursor(148, 162);
-  target.print("T");
+  target.print("T");  // TTS
   target.setCursor(148, 172);
   target.print("T");
   target.setCursor(148, 182);
   target.print("S");
   target.setCursor(218, 162);
-  target.print("s");
+  target.print("s");  // sGF
   target.setCursor(218, 172);
   target.print("G");
   target.setCursor(218, 182);
@@ -1075,11 +1115,11 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   snprintf(timeStr, sizeof(timeStr), "%3u", deco.stopTime);
   snprintf(ttsStr, sizeof(ttsStr), "%3u", deco.timeToSurface);
   snprintf(sGfStr, sizeof(sGfStr), "%3u", deco.surfGF);
-  drawColCentreText(target, stopStr, 28, 36, 169, 2, ST77XX_WHITE);
-  drawColCentreText(target, timeStr, 98, 36, 169, 2, ST77XX_WHITE);
-  drawColCentreText(target, ttsStr, 166, 36, 169, 2, ST77XX_WHITE);
-  drawColCentreText(target, sGfStr, 236, 36, 169, 2, surfGfColor);
-  // Compass banner at bottom
+  drawColCentreText(target, stopStr, 28, 36, 169, 2, ST77XX_WHITE);  // First stop depth (m)
+  drawColCentreText(target, timeStr, 98, 36, 169, 2, ST77XX_WHITE);  // First stop time (min)
+  drawColCentreText(target, ttsStr, 166, 36, 169, 2, ST77XX_WHITE);  // Time to surface (min)
+  drawColCentreText(target, sGfStr, 236, 36, 169, 2, surfGfColor);  // Surface GF (%)
+  // Compass banner at the bottom
   drawCompassBanner(target, Heading);
 }
 
@@ -1094,7 +1134,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
     }
     if (buf == nullptr) return;
     for (size_t i = 0; i < pixels; ++i) {
-      buf[i] = pgm_read_word(&image[i]);
+      buf[i] = pgm_read_word(&image[i]);  // RGB565 bitmap
     }
     display.startWrite();
     display.setAddrWindow(0, 0, w, h);
@@ -1110,8 +1150,8 @@ void setup() {
   pinMode(Boot_Pin, INPUT);
   pinMode(Power_Pin, OUTPUT);
   pinMode(Backlight_Pin, OUTPUT);
-  digitalWrite(Power_Pin, HIGH);
-  digitalWrite(Backlight_Pin, LOW);
+  digitalWrite(Power_Pin, HIGH);  // Power initially on
+  digitalWrite(Backlight_Pin, LOW);  // Backlight initially off
   delay(10);
   bool buttonHeld = true;
   const uint32_t Boot_Time_MS = millis();
@@ -1132,7 +1172,7 @@ void setup() {
 
   // Buzzer
   pinMode(Buzz_Pin, OUTPUT);
-  digitalWrite(Buzz_Pin, LOW);
+  digitalWrite(Buzz_Pin, LOW);  // Buzzer initially off
 
   // Power conservation
   esp_wifi_stop();
@@ -1146,43 +1186,40 @@ void setup() {
 
   // ADC initialisation
   pinMode(Battery_Pin, INPUT);
-  analogReadResolution(12);        // Internal ADC resolution 12-bit
+  analogReadResolution(12);  // Internal ADC resolution 12-bit
   analogSetAttenuation(ADC_11db);  // 2.5V range
 
   // Display initialisation
   spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
-  display.setSPISpeed(40000000); 
-  display.setRotation(1);
+  display.setSPISpeed(40000000);  // 40 MHz SPI clockspeed
+  display.setRotation(1);  // Rotate to landscape
 
   // Initial screen
-  display.fillScreen(ST77XX_BLACK);
+  display.fillScreen(ST77XX_BLACK);  // Clear screen before backlight on
   analogWrite(Backlight_Pin, Backlight_High);
   if (USB_Powered) {
     drawCentreText("Charging", 50, 5, ST77XX_GREEN);
     uint32_t lastUpdate = 0;
     for (;;) {
       const uint32_t now = millis();
-      // Show battery percentage while charging
       if ((now - lastUpdate) >= 1000) {
         lastUpdate = now;
         Battery_Percentage = readBatteryPercentage();
         char battStr[5];
         snprintf(battStr, sizeof(battStr), "%u%%", Battery_Percentage);
         display.fillRect(40, 120, 200, 64, ST77XX_BLACK);
-        drawCentreText(battStr, 120, 8, ST77XX_CYAN);
+        drawCentreText(battStr, 120, 8, ST77XX_CYAN);  // Show battery percentage while charging
       }
-      // Exit charging screen if button pressed
       if (digitalRead(Button_Pin) == LOW) {
         USB_Powered = false;
         display.fillScreen(ST77XX_BLACK);
-        break;
+        break;  // Exit charging screen if button pressed
       }
       delay(50);
     }
   }
-  // Show startup image
-  showImage();
+  showImage();  // Show startup image
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
@@ -1198,51 +1235,41 @@ void setup() {
     delay(10);
     // MS5837 dedicated I2C initialisation
     sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
-    sensorWire.setClock(400000);
+    sensorWire.setClock(400000);  // 400 kHz I2C clcokspeed
     delay(10);
     // MS5837 initialisation
-    sensorAvailable = sensor.init(sensorWire);
+    sensorAvailable = sensor.init(sensorWire);  // Detect MS5837 presence
     if (sensorAvailable) {
       sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
-      sensor.setFluidDensity(Density);       // Set water density
+      sensor.setFluidDensity(Density);  // Set fluid density
     }
   }
 
   // Peripheral I2C initialisation
   Wire.begin(SDA_Pin, SCL_Pin);
-  Wire.setClock(400000);
+  Wire.setClock(400000);  // 400 kHz I2C clcokspeed
   delay(10);
 
   // BH1750 initialisation
-  lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_I2C_Address, &Wire);  // 4 lux, 16 ms
+  lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_I2C_Address, &Wire);  // 4 lux resolution, 16 ms conversion time
 
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.enableSyncSampleMode();
-  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
-                      SensorQMI8658::GYR_ODR_112_1Hz,
-                      SensorQMI8658::LPF_MODE_2);
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                          SensorQMI8658::ACC_ODR_125Hz,
-                          SensorQMI8658::LPF_MODE_2);
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_112_1Hz, SensorQMI8658::LPF_MODE_2);
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_125Hz, SensorQMI8658::LPF_MODE_2);
   qmi.enableGyroscope();
   qmi.enableAccelerometer();  
 
   // QMC5883P initialisation
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
-  qmc.configMagnetometer(
-      OperationMode::CONTINUOUS_MEASUREMENT,
-      MagFullScaleRange::FS_8G,
-      100.0f,
-      MagOverSampleRatio::OSR_8,
-      MagDownSampleRatio::DSR_8
-    );
+  qmc.configMagnetometer(OperationMode::CONTINUOUS_MEASUREMENT, MagFullScaleRange::FS_8G, 100.0f, MagOverSampleRatio::OSR_8, MagDownSampleRatio::DSR_8);  // ODR 100 Hz
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
   if (!loadCompassCalibrationFromNVS()) {
     Compass_Matrices = {};
     compassSetCalibrationMatrices(nullptr);
   }
-  ahrs.begin(100.0f);
+  ahrs.begin(100.0f);  // AHRS update rate 100 Hz
 
   // ZHL-16C initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
@@ -1258,7 +1285,7 @@ void setup() {
     display.fillScreen(ST77XX_BLACK);
   }
 
-  // Display update on core 1
+  // Display update on core 1 at 20 Hz
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
@@ -1272,7 +1299,7 @@ void setup() {
             memcpy(Frame_Back_Current, Frame_Canvas->getBuffer(), Frame_Buffer_Bytes);
             flushDirtyRectFromPSRAM();
           } else {
-            updateDisplay(display, Depth, displayMinutes, displaySeconds, lastDecoResult);
+            updateDisplay(display, Depth, displayMinutes, displaySeconds, lastDecoResult);  // No PSRAM fallback
           }
           if (displayPeriodTicks > 0) {
             vTaskDelayUntil(&lastWakeTick, displayPeriodTicks);
@@ -1282,13 +1309,13 @@ void setup() {
         }
       },
       "DisplayTask",
-      8192,
+      8192,  // Stack size
       nullptr,
-      2,
+      2,  // Priority 2
       &Display_Task_Handle,
-      1);
+      1);  // Core 1
 
-  // Sensor reading and logic updates on core 0
+  // Sensor reading and caluclation on core 0
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
@@ -1298,11 +1325,11 @@ void setup() {
         for (;;) {
           const uint64_t nowMS = millis();
           serviceBuzzer(nowMS);
-          // 100 Hz
+          // 100 Hz tasks
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
             updateStopwatch(nowMS);
-            // Press Button detection
+            // Press button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
               // Long press toggles stopwatch
@@ -1349,7 +1376,7 @@ void setup() {
               digitalWrite(Power_Pin, LOW);
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
-                // Short press underwater powers off.
+                // Short press underwater to power off (shut down in case of MS5837 error)
                 saveDemoMode();
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
@@ -1364,7 +1391,7 @@ void setup() {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
-                // Short press on surface starts compass calibration.
+                // Short press on surface to start compass calibration
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Compass", 75, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 135, 4, ST77XX_WHITE);
@@ -1384,10 +1411,10 @@ void setup() {
                 digitalWrite(Power_Pin, LOW);
               }
             }
-            // Compass
+            // Compass reading
             Heading = readCompassHeading();
           }
-          // 2 Hz
+          // 2 Hz tasks
           if ((nowMS - lastDepthUpdateMS) >= Depth_Update_MS) {
             lastDepthUpdateMS = nowMS;
             // Depth
@@ -1401,22 +1428,22 @@ void setup() {
                 pressureAtm = 1.0f;
               }
             } else if (sensorAvailable) {
-              // MS5837 sensor reading
+              // MS5837 reading
               sensor.read();
               Depth = sensor.depth() - Depth_Offset;
               pressureAtm = sensor.pressure() / MBAR_PER_ATM;
             } else {
-              // Fall back values if MS5837 unavailable
+              // MS5837 error fallback
               Depth = 99.9f;
               pressureAtm = 11.0f;
             }
-            //Timer
+            // Timer
             updateTimer(Depth, nowMS);
             // Backlight and battery
             Ambient_Lux = lightMeter.readLightLevel();
             Battery_Percentage = readBatteryPercentage();
             if (Battery_Percentage <= Low_Battery_Threshold) {
-              Backlight_Level = Backlight_Low;
+              Backlight_Level = Backlight_Low;  // Low battery dims backlight
             } else {
               Backlight_Level = ambientBacklightLevel(Ambient_Lux);
             }
@@ -1430,14 +1457,14 @@ void setup() {
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
               display.fillScreen(ST77XX_BLACK);
-              digitalWrite(Power_Pin, LOW);
+              digitalWrite(Power_Pin, LOW);  // Critical battery shut down
             }
-            // 0.2 Hz: ZHL-16C
+            // 0.2 Hz tasks
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
-              const float dtMin = static_cast<float>(nowMS - Deco_Last_Update_MS) / 60000.0f;
+              const float dtMin = static_cast<float>(nowMS - Deco_Last_Update_MS) / 60000.0f;  // Minutes since last update
               Deco_Last_Update_MS = nowMS;
-              decoUpdate(pressureAtm, dtMin);
-              lastDecoResult = decoCompute(pressureAtm);
+              decoUpdate(pressureAtm, dtMin);  // ZHL-16C tissue update
+              lastDecoResult = decoCompute(pressureAtm);  // Decompression calculation
             }
           }
           if (fastPeriodTicks > 0) {
@@ -1448,11 +1475,11 @@ void setup() {
         }
       },
       "SensorTask",
-      12288,
+      12288,  // Stack size
       nullptr,
-      2,
+      2,  // Priority 2
       &Sensor_Task_Handle,
-      0);
+      0);  // Core 0
 }
 
 void loop() {

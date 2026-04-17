@@ -78,9 +78,9 @@ constexpr uint32_t Display_Update_MS = 50;
 constexpr uint32_t Fast_Update_MS = 100;
 
 // IMU Constants
-constexpr float Accel_Offset_X = 0.093489f;
-constexpr float Accel_Offset_Y = -0.051529f;
-constexpr float Accel_Offset_Z = 0.034036f;
+constexpr float Accel_Offset_X = 0.0;
+constexpr float Accel_Offset_Y = 0.0f;
+constexpr float Accel_Offset_Z = 0.0f;
 constexpr float Gyro_Offset_X = 0.4791f;
 constexpr float Gyro_Offset_Y = 5.7993f;
 constexpr float Gyro_Offset_Z = -0.7015f;
