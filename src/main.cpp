@@ -30,24 +30,31 @@
 #include "compass_label.h"
 
 // Pins
-constexpr gpio_num_t RST_Pin = GPIO_NUM_0;  // Boot button
+// System
+constexpr gpio_num_t RST_Pin = GPIO_NUM_0;  // Boot button/ LCD reset
+constexpr gpio_num_t Battery_Pin = GPIO_NUM_5;  // Battery ADC
+// Button
+constexpr gpio_num_t Button_Pin = GPIO_NUM_9;  // Connect to GND
+// IMU/BH1750 I2C
+constexpr gpio_num_t IMU_INT_Pin = GPIO_NUM_3;  // Internal
+constexpr gpio_num_t QMC_DRDY_Pin = GPIO_NUM_11;
+constexpr gpio_num_t GND_Pin = GPIO_NUM_13;
+constexpr gpio_num_t VCC_Pin = GPIO_NUM_15;
+constexpr gpio_num_t SCL_Pin = GPIO_NUM_47;  // Fixed
+constexpr gpio_num_t SDA_Pin = GPIO_NUM_48;  // Fixed
+// MS5837 I2C
+constexpr gpio_num_t Sensor_VCC_Pin = GPIO_NUM_4;
+constexpr gpio_num_t Sensor_GND_Pin = GPIO_NUM_6;
+constexpr gpio_num_t Sensor_SCL_Pin = GPIO_NUM_16;
+constexpr gpio_num_t Sensor_SDA_Pin = GPIO_NUM_17;
+// LCD (internal)
 constexpr gpio_num_t Backlight_Pin = GPIO_NUM_1;
-constexpr gpio_num_t IMU_INT_Pin = GPIO_NUM_3;
-constexpr gpio_num_t Battery_Pin = GPIO_NUM_5;
-constexpr gpio_num_t Button_Pin = GPIO_NUM_9;
-constexpr gpio_num_t Sensor_SDA_Pin = GPIO_NUM_10;
-constexpr gpio_num_t Sensor_VCC_Pin = GPIO_NUM_19;
-constexpr gpio_num_t Sensor_SCL_Pin = GPIO_NUM_20;
 constexpr gpio_num_t MOSI_Pin = GPIO_NUM_38;
 constexpr gpio_num_t SCK_Pin = GPIO_NUM_39;
 constexpr gpio_num_t MISO_Pin = GPIO_NUM_40;
-constexpr gpio_num_t SD_CS_Pin = GPIO_NUM_41;
+constexpr gpio_num_t SD_CS_Pin = GPIO_NUM_41;  // SD card CS
 constexpr gpio_num_t DC_Pin = GPIO_NUM_42;
-constexpr gpio_num_t U0TXD_Pin = GPIO_NUM_43;
-constexpr gpio_num_t U0RXD_Pin = GPIO_NUM_44;
-constexpr gpio_num_t LCD_CS_Pin = GPIO_NUM_45;
-constexpr gpio_num_t SCL_Pin = GPIO_NUM_47;
-constexpr gpio_num_t SDA_Pin = GPIO_NUM_48;
+constexpr gpio_num_t LCD_CS_Pin = GPIO_NUM_45;  // LCD CS
 
 // Objects
 SPIClass spi(FSPI);
@@ -1113,167 +1120,180 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   drawCompassBanner(target, Heading);
 }
 
-  // Show Startup Image
-  void showImage() {
-    const uint16_t w = 320;
-    const uint16_t h = 240;
-    const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
-    uint16_t *buf = static_cast<uint16_t *>(heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (buf == nullptr) {
-      buf = static_cast<uint16_t *>(malloc(pixels * sizeof(uint16_t)));
-    }
-    if (buf == nullptr) return;
-    for (size_t i = 0; i < pixels; ++i) {
-      buf[i] = pgm_read_word(&image[i]);  // RGB565 bitmap
-    }
-    display.startWrite();
-    display.setAddrWindow(0, 0, w, h);
-    display.writePixels(buf, static_cast<uint32_t>(pixels), true, false);
-    display.endWrite();
-    free(buf);
+// Show Startup Image
+void showImage() {
+  const uint16_t w = 320;
+  const uint16_t h = 240;
+  const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+  uint16_t *buf = static_cast<uint16_t *>(heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buf == nullptr) {
+    buf = static_cast<uint16_t *>(malloc(pixels * sizeof(uint16_t)));
   }
+  if (buf == nullptr) return;
+  for (size_t i = 0; i < pixels; ++i) {
+    buf[i] = pgm_read_word(&image[i]);  // RGB565 bitmap
+  }
+  display.startWrite();
+  display.setAddrWindow(0, 0, w, h);
+  display.writePixels(buf, static_cast<uint32_t>(pixels), true, false);
+  display.endWrite();
+  free(buf);
+}
 
-  // WiFi AP JPEG Upload Server
-  void startJpegUploadServer() {
-    if (Display_Task_Handle != nullptr) {
-      vTaskSuspend(Display_Task_Handle);
-    }
-    esp_wifi_start();
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(SSID, Password);
-    const IPAddress apIP = WiFi.softAPIP();
-    display.fillScreen(ST77XX_BLACK);
-    display.setTextColor(ST77XX_WHITE);
-    display.setTextSize(3);
-    display.setCursor(10, 10);
-    display.print("Upload JPEG");
-    display.setTextSize(2);
-    display.setTextColor(ST77XX_CYAN);
-    display.setCursor(10, 60);
-    display.print("SSID: ");
-    display.print(SSID);
-    display.setCursor(10, 85);
-    display.print("Password: ");
-    display.print(Password);
-    display.setCursor(10, 110);
-    WebServer server(80);
-    static const char *uploadHtml =
-      "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-      "<title>Dive Computer</title><style>body{font-family:sans-serif;text-align:center;padding:20px}"
-      "h2{color:#0af}input[type=file],input[type=submit]{margin:10px;padding:8px 16px;font-size:16px}"
-      "input[type=submit]{background:#0af;color:#fff;border:none;border-radius:4px;cursor:pointer}</style></head>"
-      "<body><h2>Upload JPEG</h2>"
-      "<p>Image must be 320x240 pixels.</p>"
-      "<form method='POST' action='/upload' enctype='multipart/form-data'>"
-      "<input type='file' name='file' accept='.jpg,.jpeg'><br>"
-      "<input type='submit' value='Upload'></form></body></html>";
-    server.on("/", HTTP_GET, [&]() {
-      server.send(200, "text/html", uploadHtml);
-    });
-    server.on("/upload", HTTP_POST,
-      [&]() {
-        server.send(200, "text/plain", "OK");
-      },
-      [&]() {
-        HTTPUpload &upload = server.upload();
-        static File uploadFile;
-        if (upload.status == UPLOAD_FILE_START) {
-          if (SPIFFS.exists(Spiffs_Jpeg_Path)) {
-            SPIFFS.remove(Spiffs_Jpeg_Path);
-          }
-          uploadFile = SPIFFS.open(Spiffs_Jpeg_Path, FILE_WRITE);
-        } else if (upload.status == UPLOAD_FILE_WRITE) {
-          if (uploadFile) {
-            uploadFile.write(upload.buf, upload.currentSize);
-          }
-        } else if (upload.status == UPLOAD_FILE_END) {
-          if (uploadFile) {
-            uploadFile.close();
-          }
-          display.fillScreen(ST77XX_BLACK);
-          display.setTextSize(3);
-          display.setTextColor(ST77XX_GREEN);
-          display.setCursor(10, 90);
-          display.print("Upload Done!");
-          display.setTextSize(2);
-          display.setTextColor(ST77XX_WHITE);
-          display.setCursor(10, 140);
-          display.print("Restarting...");
-          delay(Message_MS);
-          esp_restart();
+// WiFi AP JPEG Upload Server
+void startJpegUploadServer() {
+  if (Display_Task_Handle != nullptr) {
+    vTaskSuspend(Display_Task_Handle);
+  }
+  esp_wifi_start();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(SSID, Password);
+  const IPAddress apIP = WiFi.softAPIP();
+  display.fillScreen(ST77XX_BLACK);
+  display.setTextColor(ST77XX_WHITE);
+  display.setTextSize(3);
+  display.setCursor(10, 10);
+  display.print("Upload JPEG");
+  display.setTextSize(2);
+  display.setTextColor(ST77XX_CYAN);
+  display.setCursor(10, 60);
+  display.print("SSID: ");
+  display.print(SSID);
+  display.setCursor(10, 85);
+  display.print("Password: ");
+  display.print(Password);
+  display.setCursor(10, 110);
+  WebServer server(80);
+  static const char *uploadHtml =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Dive Computer</title><style>body{font-family:sans-serif;text-align:center;padding:20px}"
+    "h2{color:#0af}input[type=file],input[type=submit]{margin:10px;padding:8px 16px;font-size:16px}"
+    "input[type=submit]{background:#0af;color:#fff;border:none;border-radius:4px;cursor:pointer}</style></head>"
+    "<body><h2>Upload JPEG</h2>"
+    "<p>Image must be 320x240 pixels.</p>"
+    "<form method='POST' action='/upload' enctype='multipart/form-data'>"
+    "<input type='file' name='file' accept='.jpg,.jpeg'><br>"
+    "<input type='submit' value='Upload'></form></body></html>";
+  server.on("/", HTTP_GET, [&]() {
+    server.send(200, "text/html", uploadHtml);
+  });
+  server.on("/upload", HTTP_POST,
+    [&]() {
+      server.send(200, "text/plain", "OK");
+    },
+    [&]() {
+      HTTPUpload &upload = server.upload();
+      static File uploadFile;
+      if (upload.status == UPLOAD_FILE_START) {
+        if (SPIFFS.exists(Spiffs_Jpeg_Path)) {
+          SPIFFS.remove(Spiffs_Jpeg_Path);
         }
+        uploadFile = SPIFFS.open(Spiffs_Jpeg_Path, FILE_WRITE);
+      } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (uploadFile) {
+          uploadFile.write(upload.buf, upload.currentSize);
+        }
+      } else if (upload.status == UPLOAD_FILE_END) {
+        if (uploadFile) {
+          uploadFile.close();
+        }
+        display.fillScreen(ST77XX_BLACK);
+        display.setTextSize(3);
+        display.setTextColor(ST77XX_GREEN);
+        display.setCursor(10, 90);
+        display.print("Upload Done!");
+        display.setTextSize(2);
+        display.setTextColor(ST77XX_WHITE);
+        display.setCursor(10, 140);
+        display.print("Restarting...");
+        delay(Message_MS);
+        esp_restart();
       }
-    );
-    server.begin();
-    for (;;) {
-      server.handleClient();
-      delay(1);
     }
+  );
+  server.begin();
+  for (;;) {
+    server.handleClient();
+    delay(1);
   }
+}
 
-  // SPIFFS JPEG Decode Callback
-  bool jpegOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
-    display.startWrite();
-    display.setAddrWindow(x, y, w, h);
-    display.writePixels(bitmap, static_cast<uint32_t>(w) * static_cast<uint32_t>(h), true, false);
-    display.endWrite();
-    return true;
+// SPIFFS JPEG Decode Callback
+bool jpegOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
+  display.startWrite();
+  display.setAddrWindow(x, y, w, h);
+  display.writePixels(bitmap, static_cast<uint32_t>(w) * static_cast<uint32_t>(h), true, false);
+  display.endWrite();
+  return true;
+}
+bool initSpiffsJpegSource() {
+  if (!SPIFFS.begin(true)) {
+    return false;
   }
-  bool initSpiffsJpegSource() {
-    if (!SPIFFS.begin(true)) {
-      return false;
-    }
-    if (!SPIFFS.exists(Spiffs_Jpeg_Path)) {
-      return false;
-    }
-    uint16_t jpgW = 0;
-    uint16_t jpgH = 0;
-    if (TJpgDec.getFsJpgSize(&jpgW, &jpgH, Spiffs_Jpeg_Path, SPIFFS) != JDR_OK) {
-      return false;
-    }
-    if (jpgW != LCD_Width || jpgH != LCD_Height) {
-      return false;
-    }
-    TJpgDec.setJpgScale(1);
-    TJpgDec.setSwapBytes(true);
-    TJpgDec.setCallback(jpegOutputCallback);
-    return true;
+  if (!SPIFFS.exists(Spiffs_Jpeg_Path)) {
+    return false;
   }
+  uint16_t jpgW = 0;
+  uint16_t jpgH = 0;
+  if (TJpgDec.getFsJpgSize(&jpgW, &jpgH, Spiffs_Jpeg_Path, SPIFFS) != JDR_OK) {
+    return false;
+  }
+  if (jpgW != LCD_Width || jpgH != LCD_Height) {
+    return false;
+  }
+  TJpgDec.setJpgScale(1);
+  TJpgDec.setSwapBytes(true);
+  TJpgDec.setCallback(jpegOutputCallback);
+  return true;
+}
 
-  // Display JPEG from SPIFFS
-  void showSpiffsJpeg() {
-    if (!Spiffs_Jpeg_Ready) {
-      if (Display_Task_Handle != nullptr) {
-        vTaskSuspend(Display_Task_Handle);
-      }
-      display.fillScreen(ST77XX_BLACK);
-      drawCentreText("No Image", 104, 3, ST77XX_RED);
-      delay(Message_MS);
-      if (Display_Task_Handle != nullptr) {
-        vTaskResume(Display_Task_Handle);
-      }
-      Frame_Have_Previous = false;
-      return;
-    }
+// Display JPEG from SPIFFS
+void showSpiffsJpeg() {
+  if (!Spiffs_Jpeg_Ready) {
     if (Display_Task_Handle != nullptr) {
       vTaskSuspend(Display_Task_Handle);
     }
     display.fillScreen(ST77XX_BLACK);
-    const JRESULT decodeResult = TJpgDec.drawFsJpg(0, 0, Spiffs_Jpeg_Path, SPIFFS);
-    if (decodeResult == JDR_OK) {
-      delay(Message_MS * 3);
-    } else {
-      display.fillScreen(ST77XX_BLACK);
-      drawCentreText("Image Error", 104, 3, ST77XX_RED);
-      delay(Message_MS);
-    }
-    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("No Image", 104, 3, ST77XX_RED);
+    delay(Message_MS);
     if (Display_Task_Handle != nullptr) {
       vTaskResume(Display_Task_Handle);
     }
     Frame_Have_Previous = false;
+    return;
   }
+  if (Display_Task_Handle != nullptr) {
+    vTaskSuspend(Display_Task_Handle);
+  }
+  display.fillScreen(ST77XX_BLACK);
+  const JRESULT decodeResult = TJpgDec.drawFsJpg(0, 0, Spiffs_Jpeg_Path, SPIFFS);
+  if (decodeResult == JDR_OK) {
+    delay(Message_MS * 3);
+  } else {
+    display.fillScreen(ST77XX_BLACK);
+    drawCentreText("Image Error", 104, 3, ST77XX_RED);
+    delay(Message_MS);
+  }
+  display.fillScreen(ST77XX_BLACK);
+  if (Display_Task_Handle != nullptr) {
+    vTaskResume(Display_Task_Handle);
+  }
+  Frame_Have_Previous = false;
+}
 
+// Power Off
+void powerOff() {
+  display.fillScreen(ST77XX_BLACK);
+  drawCentreText("Power", 75, 4, ST77XX_CYAN);
+  drawCentreText("Off", 135, 4, ST77XX_CYAN);
+  delay(Message_MS);
+  display.fillScreen(ST77XX_BLACK);
+  digitalWrite(Backlight_Pin, LOW);
+  digitalWrite(Sensor_VCC_Pin, LOW);
+  digitalWrite(VCC_Pin, LOW);
+  esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
+  esp_deep_sleep_start();
+}
 
 void setup() {
   // Power on
@@ -1331,7 +1351,9 @@ void setup() {
   if (!Demo_Mode) {
     // Power MS5837
     pinMode(Sensor_VCC_Pin, OUTPUT);
+    pinMode(Sensor_GND_Pin, OUTPUT);
     digitalWrite(Sensor_VCC_Pin, HIGH);
+    digitalWrite(Sensor_GND_Pin, LOW);
     delay(10);
     // MS5837 dedicated I2C initialisation
     sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
@@ -1346,6 +1368,11 @@ void setup() {
   }
 
   // Peripheral I2C initialisation
+  pinMode(VCC_Pin, OUTPUT);
+  pinMode(GND_Pin, OUTPUT);
+  digitalWrite(VCC_Pin, HIGH);
+  digitalWrite(GND_Pin, LOW);
+  delay(10);
   Wire.begin(SDA_Pin, SCL_Pin);
   Wire.setClock(400000);  // 400 kHz I2C clcokspeed
   delay(10);
@@ -1440,17 +1467,11 @@ void setup() {
                 ripNtear(ripNtear_Mode);
                 Deco_Last_Update_MS = nowMS - Deco_Update_MS;
               } else {
-                // Hold button to deep sleep on surface
+                // Hold button to power off on surface
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Deep", 75, 4, ST77XX_CYAN);
-                drawCentreText("Off", 135, 4, ST77XX_CYAN);
-                delay(Message_MS);
-                display.fillScreen(ST77XX_BLACK);
-                esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
-                esp_deep_sleep_start();
+                powerOff();
               }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
               // Short press toggles stopwatch
@@ -1479,17 +1500,11 @@ void setup() {
               startJpegUploadServer();
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
-                // Short press underwater to deep sleep (shut down in case of MS5837 error)
+                // Short press underwater to power off (exit in case of MS5837 error)
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
-                display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Power", 75, 4, ST77XX_CYAN);
-                drawCentreText("Off", 135, 4, ST77XX_CYAN);
-                delay(Message_MS);
-                display.fillScreen(ST77XX_BLACK);
-                esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
-                esp_deep_sleep_start();
+                powerOff();
               } else {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
@@ -1559,9 +1574,7 @@ void setup() {
               drawCentreText("Battery", 86, 4, ST77XX_RED);
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
-              display.fillScreen(ST77XX_BLACK);
-              esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
-              esp_deep_sleep_start();  // Critical battery shut down
+              powerOff();  // Critical battery shut down
             }
             // 0.2 Hz tasks
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
