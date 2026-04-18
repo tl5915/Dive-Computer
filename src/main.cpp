@@ -5,7 +5,9 @@
 #include <esp_heap_caps.h>
 #include <esp_pm.h>
 // Peripherals
-#include <SD.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <WiFi.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <BH1750.h>
@@ -143,6 +145,13 @@ constexpr uint8_t Percentage_Table[] = {
     0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100};
 constexpr size_t Battery_Table_Size = sizeof(Voltage_Table) / sizeof(Voltage_Table[0]);
 
+// SPIFFS JPEG path
+constexpr const char *Spiffs_Jpeg_Path = "/image.jpg";
+
+// WiFi AP credentials
+constexpr const char *SSID = "DiveComputer";
+constexpr const char *Password = "12345678";
+
 // RTOS Variables
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
@@ -153,8 +162,7 @@ size_t Frame_Buffer_Bytes = 0;
 uint16_t Render_Width = 0;
 uint16_t Render_Height = 0;
 bool Frame_Have_Previous = false;
-String Sd_Jpeg_Path;
-bool Sd_Jpeg_Ready = false;
+bool Spiffs_Jpeg_Ready = false;
 
 // Modes
 bool Demo_Mode = false;
@@ -194,6 +202,7 @@ uint8_t Boot_Stable_State = HIGH;
 uint64_t Boot_Last_Change_MS = 0;
 uint64_t Boot_Press_Start_MS = 0;
 bool Boot_Long_Event_Fired = false;
+bool Boot_Hold_Event_Fired = false;
 
 // Decompression Variables
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
@@ -340,6 +349,7 @@ enum class BootButtonEvent : uint8_t {
   None = 0,
   ShortPress,
   LongPress,
+  HoldPress,
 };
 BootButtonEvent checkBootButton(uint64_t nowMS) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(RST_Pin));
@@ -354,6 +364,7 @@ BootButtonEvent checkBootButton(uint64_t nowMS) {
       if (Boot_Stable_State == LOW) {
         Boot_Press_Start_MS = nowMS;
         Boot_Long_Event_Fired = false;
+        Boot_Hold_Event_Fired = false;
       } else {
         const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
         if (!Boot_Long_Event_Fired && heldMS <= Button_Short_MS) {
@@ -362,6 +373,13 @@ BootButtonEvent checkBootButton(uint64_t nowMS) {
           Boot_Long_Event_Fired = true;
           event = BootButtonEvent::LongPress;
         }
+      }
+    }
+    if (Boot_Stable_State == LOW) {
+      const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
+      if (!Boot_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
+        Boot_Hold_Event_Fired = true;
+        event = BootButtonEvent::HoldPress;
       }
     }
   }
@@ -1115,37 +1133,85 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
     free(buf);
   }
 
-  // Find JPEG Files
-  bool hasJpegExtension(const String &name) {
-    return name.endsWith(".jpg") || name.endsWith(".JPG") || name.endsWith(".jpeg") || name.endsWith(".JPEG");
-  }
-  bool findFirstJpegOnSd(String &pathOut) {
-    File root = SD.open("/");
-    if (!root || !root.isDirectory()) {
-      return false;
+  // WiFi AP JPEG Upload Server
+  void startJpegUploadServer() {
+    if (Display_Task_Handle != nullptr) {
+      vTaskSuspend(Display_Task_Handle);
     }
-    File entry = root.openNextFile();
-    while (entry) {
-      if (!entry.isDirectory()) {
-        String name = String(entry.name());
-        if (hasJpegExtension(name)) {
-          if (!name.startsWith("/")) {
-            name = "/" + name;
+    esp_wifi_start();
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(SSID, Password);
+    const IPAddress apIP = WiFi.softAPIP();
+    display.fillScreen(ST77XX_BLACK);
+    display.setTextColor(ST77XX_WHITE);
+    display.setTextSize(3);
+    display.setCursor(10, 10);
+    display.print("Upload JPEG");
+    display.setTextSize(2);
+    display.setTextColor(ST77XX_CYAN);
+    display.setCursor(10, 60);
+    display.print("SSID: ");
+    display.print(SSID);
+    display.setCursor(10, 85);
+    display.print("Password: ");
+    display.print(Password);
+    display.setCursor(10, 110);
+    WebServer server(80);
+    static const char *uploadHtml =
+      "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+      "<title>Dive Computer</title><style>body{font-family:sans-serif;text-align:center;padding:20px}"
+      "h2{color:#0af}input[type=file],input[type=submit]{margin:10px;padding:8px 16px;font-size:16px}"
+      "input[type=submit]{background:#0af;color:#fff;border:none;border-radius:4px;cursor:pointer}</style></head>"
+      "<body><h2>Upload JPEG</h2>"
+      "<p>Image must be 320x240 pixels.</p>"
+      "<form method='POST' action='/upload' enctype='multipart/form-data'>"
+      "<input type='file' name='file' accept='.jpg,.jpeg'><br>"
+      "<input type='submit' value='Upload'></form></body></html>";
+    server.on("/", HTTP_GET, [&]() {
+      server.send(200, "text/html", uploadHtml);
+    });
+    server.on("/upload", HTTP_POST,
+      [&]() {
+        server.send(200, "text/plain", "OK");
+      },
+      [&]() {
+        HTTPUpload &upload = server.upload();
+        static File uploadFile;
+        if (upload.status == UPLOAD_FILE_START) {
+          if (SPIFFS.exists(Spiffs_Jpeg_Path)) {
+            SPIFFS.remove(Spiffs_Jpeg_Path);
           }
-          pathOut = name;
-          entry.close();
-          root.close();
-          return true;
+          uploadFile = SPIFFS.open(Spiffs_Jpeg_Path, FILE_WRITE);
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+          if (uploadFile) {
+            uploadFile.write(upload.buf, upload.currentSize);
+          }
+        } else if (upload.status == UPLOAD_FILE_END) {
+          if (uploadFile) {
+            uploadFile.close();
+          }
+          display.fillScreen(ST77XX_BLACK);
+          display.setTextSize(3);
+          display.setTextColor(ST77XX_GREEN);
+          display.setCursor(10, 90);
+          display.print("Upload Done!");
+          display.setTextSize(2);
+          display.setTextColor(ST77XX_WHITE);
+          display.setCursor(10, 140);
+          display.print("Restarting...");
+          delay(Message_MS);
+          esp_restart();
         }
       }
-      entry.close();
-      entry = root.openNextFile();
+    );
+    server.begin();
+    for (;;) {
+      server.handleClient();
+      delay(1);
     }
-    root.close();
-    return false;
   }
 
-  // SD Card Initialisation and JPEG Decode
+  // SPIFFS JPEG Decode Callback
   bool jpegOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
     display.startWrite();
     display.setAddrWindow(x, y, w, h);
@@ -1153,17 +1219,16 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
     display.endWrite();
     return true;
   }
-  bool initSdJpegSource() {
-    if (!SD.begin(SD_CS_Pin, spi)) {
+  bool initSpiffsJpegSource() {
+    if (!SPIFFS.begin(true)) {
       return false;
     }
-    String jpgPath;
-    if (!findFirstJpegOnSd(jpgPath)) {
+    if (!SPIFFS.exists(Spiffs_Jpeg_Path)) {
       return false;
     }
     uint16_t jpgW = 0;
     uint16_t jpgH = 0;
-    if (TJpgDec.getSdJpgSize(&jpgW, &jpgH, jpgPath) != JDR_OK) {
+    if (TJpgDec.getFsJpgSize(&jpgW, &jpgH, Spiffs_Jpeg_Path, SPIFFS) != JDR_OK) {
       return false;
     }
     if (jpgW != LCD_Width || jpgH != LCD_Height) {
@@ -1172,13 +1237,12 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
     TJpgDec.setJpgScale(1);
     TJpgDec.setSwapBytes(true);
     TJpgDec.setCallback(jpegOutputCallback);
-    Sd_Jpeg_Path = jpgPath;
     return true;
   }
 
-  // Display JPEG Image
-  void showSdJpeg() {
-    if (!Sd_Jpeg_Ready) {
+  // Display JPEG from SPIFFS
+  void showSpiffsJpeg() {
+    if (!Spiffs_Jpeg_Ready) {
       if (Display_Task_Handle != nullptr) {
         vTaskSuspend(Display_Task_Handle);
       }
@@ -1195,7 +1259,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
       vTaskSuspend(Display_Task_Handle);
     }
     display.fillScreen(ST77XX_BLACK);
-    const JRESULT decodeResult = TJpgDec.drawSdJpg(0, 0, Sd_Jpeg_Path);
+    const JRESULT decodeResult = TJpgDec.drawFsJpg(0, 0, Spiffs_Jpeg_Path, SPIFFS);
     if (decodeResult == JDR_OK) {
       delay(Message_MS * 3);
     } else {
@@ -1258,8 +1322,8 @@ void setup() {
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
-  // SD card initialisation
-  Sd_Jpeg_Ready = initSdJpegSource();
+  // SPIFFS initialisation
+  Spiffs_Jpeg_Ready = initSpiffsJpegSource();
 
   // MS5837 initialisation if not in demo mode
   loadDemoMode();
@@ -1367,8 +1431,8 @@ void setup() {
             // Press button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
-              // Long press to display image from SD card
-              showSdJpeg();
+              // Long press to display image from SPIFFS
+              showSpiffsJpeg();
             } else if (buttonEvent == PressButtonEvent::HoldPress) {
               if (Depth >= Dive_Start_Depth) {
                 // Hold button to change GF underwater
@@ -1410,6 +1474,9 @@ void setup() {
               drawCentreText(Demo_Mode ? "On" : "Off", 135, 4, ST77XX_CYAN);
               delay(Message_MS);
               esp_restart();  // Restart after mode change
+            } else if (bootEvent == BootButtonEvent::HoldPress) {
+              // Hold boot button to upload JPEG image via WiFi AP
+              startJpegUploadServer();
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
                 // Short press underwater to deep sleep (shut down in case of MS5837 error)
