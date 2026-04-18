@@ -1,4 +1,4 @@
-# Convert 280 x 240 pixels PNG image to RGB565 bitmap header
+# Convert 320 x 240 pixels PNG image to RGB565 bitmap header
 
 import png
 import sys

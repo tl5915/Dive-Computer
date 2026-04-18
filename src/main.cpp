@@ -5,6 +5,7 @@
 #include <esp_heap_caps.h>
 #include <esp_pm.h>
 // Peripherals
+#include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <BH1750.h>
@@ -17,6 +18,7 @@
 #include <Preferences.h>
 #include <vector>
 #include <ZHL16C.h>
+#include <TJpg_Decoder.h>
 #include <Adafruit_AHRS.h>
 #include <magnetometer_calibration.h>
 // Header Files
@@ -26,30 +28,28 @@
 #include "compass_label.h"
 
 // Pins
-constexpr uint8_t Boot_Pin = 0;
-constexpr uint8_t Battery_Pin = 1;
-constexpr uint8_t DC_Pin = 4;
-constexpr uint8_t CS_Pin = 5;
-constexpr uint8_t SCK_Pin = 6;
-constexpr uint8_t MOSI_Pin = 7;
-constexpr uint8_t RST_Pin = 8;
-constexpr uint8_t Backlight_Pin = 15;
-constexpr uint8_t SCL_Pin = 10;
-constexpr uint8_t SDA_Pin = 11;
-constexpr uint8_t Sensor_VCC_Pin = 3;
-constexpr uint8_t Sensor_GND_Pin = 16;
-constexpr uint8_t Sensor_SCL_Pin = 17;
-constexpr uint8_t Sensor_SDA_Pin = 18;
-constexpr uint8_t QMI_INT_Pin = 38;
-constexpr uint8_t Button_Pin = 40;
-constexpr uint8_t Power_Pin = 41;
-constexpr uint8_t Buzz_Pin = 42;
-constexpr uint8_t U0TXD_Pin = 43;
-constexpr uint8_t U0RXD_Pin = 44;
+constexpr gpio_num_t RST_Pin = GPIO_NUM_0;  // Boot button
+constexpr gpio_num_t Backlight_Pin = GPIO_NUM_1;
+constexpr gpio_num_t IMU_INT_Pin = GPIO_NUM_3;
+constexpr gpio_num_t Battery_Pin = GPIO_NUM_5;
+constexpr gpio_num_t Button_Pin = GPIO_NUM_9;
+constexpr gpio_num_t Sensor_SDA_Pin = GPIO_NUM_10;
+constexpr gpio_num_t Sensor_VCC_Pin = GPIO_NUM_19;
+constexpr gpio_num_t Sensor_SCL_Pin = GPIO_NUM_20;
+constexpr gpio_num_t MOSI_Pin = GPIO_NUM_38;
+constexpr gpio_num_t SCK_Pin = GPIO_NUM_39;
+constexpr gpio_num_t MISO_Pin = GPIO_NUM_40;
+constexpr gpio_num_t SD_CS_Pin = GPIO_NUM_41;
+constexpr gpio_num_t DC_Pin = GPIO_NUM_42;
+constexpr gpio_num_t U0TXD_Pin = GPIO_NUM_43;
+constexpr gpio_num_t U0RXD_Pin = GPIO_NUM_44;
+constexpr gpio_num_t LCD_CS_Pin = GPIO_NUM_45;
+constexpr gpio_num_t SCL_Pin = GPIO_NUM_47;
+constexpr gpio_num_t SDA_Pin = GPIO_NUM_48;
 
 // Objects
 SPIClass spi(FSPI);
-Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
+Adafruit_ST7789 display(&spi, LCD_CS_Pin, DC_Pin, RST_Pin);
 Preferences prefs;
 TwoWire sensorWire(1);
 MS5837 sensor;
@@ -65,8 +65,8 @@ constexpr uint8_t BH1750_I2C_Address = 0x23;
 constexpr uint8_t MS5837_I2C_Address = 0x76;
 
 // LCD Constants
-constexpr uint16_t LCD_Width = 240;
-constexpr uint16_t LCD_Height = 280;
+constexpr uint16_t LCD_Width = 320;
+constexpr uint16_t LCD_Height = 240;
 constexpr uint8_t Low_Battery_Threshold = 10;      // Dim screen at 10%
 constexpr uint8_t Critical_Battery_Threshold = 0;  // Auto shut down at 0%
 constexpr float Battery_Divider_Ratio = 3.0f;      // 2:1 voltage divider
@@ -85,10 +85,6 @@ constexpr uint32_t Button_Short_MS = 799;         // Short press threshold
 constexpr uint32_t Button_Long_MS = 800;          // Long press threshold
 constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
-
-// Buzzer Constants
-constexpr uint16_t Buzzer_Frequency = 3800;   // 3.8 kHz resonant frequency
-constexpr uint16_t Buzzer_Duration_MS = 500;  // 0.5 second buzz
 
 // Depth Sensor Constants
 constexpr uint16_t Density = 1020;        // EN13319 density
@@ -157,6 +153,8 @@ size_t Frame_Buffer_Bytes = 0;
 uint16_t Render_Width = 0;
 uint16_t Render_Height = 0;
 bool Frame_Have_Previous = false;
+String Sd_Jpeg_Path;
+bool Sd_Jpeg_Ready = false;
 
 // Modes
 bool Demo_Mode = false;
@@ -181,7 +179,6 @@ float Ambient_Lux = 0.0f;
 float Battery_Voltage = 0.0f;
 uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
-bool USB_Powered = false;
 
 // Press Button Variables
 uint8_t Button_Last_Reading = HIGH;
@@ -197,10 +194,6 @@ uint8_t Boot_Stable_State = HIGH;
 uint64_t Boot_Last_Change_MS = 0;
 uint64_t Boot_Press_Start_MS = 0;
 bool Boot_Long_Event_Fired = false;
-
-// Buzzer Variables
-bool Buzzer_Active = false;
-uint64_t Buzzer_End_MS = 0;
 
 // Decompression Variables
 DecoResult lastDecoResult = {false, 0, 0, 0, 0};
@@ -349,7 +342,7 @@ enum class BootButtonEvent : uint8_t {
   LongPress,
 };
 BootButtonEvent checkBootButton(uint64_t nowMS) {
-  const uint8_t reading = static_cast<uint8_t>(digitalRead(Boot_Pin));
+  const uint8_t reading = static_cast<uint8_t>(digitalRead(RST_Pin));
   if (reading != Boot_Last_Reading) {
     Boot_Last_Change_MS = nowMS;
     Boot_Last_Reading = reading;
@@ -375,28 +368,11 @@ BootButtonEvent checkBootButton(uint64_t nowMS) {
   return event;
 }
 
-// Buzzer
-void buzzer(uint64_t nowMS) {
-  tone(Buzz_Pin, Buzzer_Frequency);
-  Buzzer_End_MS = nowMS + Buzzer_Duration_MS;
-  Buzzer_Active = true;
-}
-void serviceBuzzer(uint64_t nowMS) {
-  if (!Buzzer_Active) {
-    return;
-  }
-  if (nowMS >= Buzzer_End_MS) {
-    noTone(Buzz_Pin);
-    Buzzer_Active = false;
-  }
-}
-
 // Frame Buffer Management
 bool initFrameBuffers() {
   Render_Width = static_cast<uint16_t>(display.width());
   Render_Height = static_cast<uint16_t>(display.height());
   Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
-
   Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
   if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
     return false;
@@ -533,12 +509,12 @@ void saveDemoMode() {
 }
 
 // Display Centre Text 
-void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colour) {
+void drawCentreText(const char *text, int16_t y, uint8_t font, uint16_t colour) {
   int16_t x1 = 0;
   int16_t y1 = 0;
   uint16_t w = 0;
   uint16_t h = 0;
-  display.setTextSize(textSize);
+  display.setTextSize(font);
   display.setTextWrap(false);
   display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
   const int16_t x = ((display.width() - static_cast<int16_t>(w)) / 2) - x1;
@@ -548,10 +524,10 @@ void drawCentreText(const char *text, int16_t y, uint8_t textSize, uint16_t colo
 }
 
 // Display Column-Centred Text
-void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t textSize, uint16_t colour) {
+void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int16_t colW, int16_t y, uint8_t font, uint16_t colour) {
   int16_t x1 = 0, y1 = 0;
   uint16_t w = 0, h = 0;
-  target.setTextSize(textSize);
+  target.setTextSize(font);
   target.setTextWrap(false);
   target.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
   const int16_t x = colX + ((colW - static_cast<int16_t>(w)) / 2) - x1;
@@ -738,7 +714,7 @@ void drawCalibrationDiagnostics(bool calibration_ok) {
   }
   display.setTextSize(3);
   display.setTextColor(state_colour);
-  display.setCursor(40, 20);
+  display.setCursor(20, 20);
   display.print(calibration_ok ? "Success" : "Failed");
   display.setTextSize(2);
   display.setTextColor(ST77XX_WHITE);
@@ -783,7 +759,7 @@ void drawCalibrationScore() {
   }
   display.setTextSize(3);
   display.setTextColor(score_colour);
-  display.setCursor(40, 20);
+  display.setCursor(20, 20);
   display.print("Score: ");
   display.print(score);
   display.print("%");
@@ -883,8 +859,8 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
   constexpr int16_t outlineW = 40;
   constexpr int16_t outlineH = 14;
   constexpr int16_t padding = 3;
-  const int16_t outlineX = 212;  // Top-right corner avoiding rounded edge
-  const int16_t outlineY = 4;
+  const int16_t outlineX = 276;  // Top-right corner
+  const int16_t outlineY = 0;
   const int16_t fillWidth = map(percentage, 0, 100, 0, outlineW - (padding * 2));
   target.fillRect(outlineX + padding, outlineY + padding, outlineW - (padding * 2), outlineH - (padding * 2), ST77XX_BLACK);
   target.drawRect(outlineX, outlineY, outlineW, outlineH, ST77XX_WHITE);
@@ -893,7 +869,7 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
 }
 
 // Heading Block
-void drawHeadingValue(Adafruit_GFX &target, int16_t y, float direction) {
+void drawHeadingValue(Adafruit_GFX &target, int16_t x, int16_t y, int8_t font, float direction) {
   int heading = static_cast<int>(direction + 0.5f);
   if (heading == 360) {
     heading = 0;
@@ -901,8 +877,8 @@ void drawHeadingValue(Adafruit_GFX &target, int16_t y, float direction) {
   char headingString[4];
   snprintf(headingString, sizeof(headingString), "%03u", heading);
   target.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
-  target.setTextSize(4);
-  target.setCursor(190, y);  // Allign right edge
+  target.setTextSize(font);
+  target.setCursor(x, y);
   target.print(headingString);
   target.setTextSize(2);
   target.cp437(true);
@@ -919,8 +895,8 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
   const float minorLabelScale = majorLabelScale;
   target.setTextWrap(false);
   target.fillRect(0, compassY + 12, bannerWidth, 37, ST77XX_BLACK);  // Tick and label area
-  target.drawFastHLine(0, 200, 280, ST77XX_WHITE);  // Thick upper line
-  target.drawFastHLine(0, 201, 280, ST77XX_WHITE);  // Thick upper line
+  target.drawFastHLine(0, 200, bannerWidth, ST77XX_WHITE);  // Thick upper line
+  target.drawFastHLine(0, 201, bannerWidth, ST77XX_WHITE);  // Thick upper line
   target.fillTriangle(centerX - 4, 203, centerX + 4, 203, centerX, 212, ST77XX_CYAN);  // Heading indicator arrow
   target.drawLine(centerX, 212, centerX, 239, ST77XX_CYAN);  // Heading indicator line
   const float pixelsPerDegree = static_cast<float>(bannerWidth) / 180.0f;
@@ -988,7 +964,7 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
 
 // Main Display
 void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, const DecoResult &deco) {
-  // Depth block at top-left
+  // Depth block at top-left (156+24+96=288 pixels wide, 104 pixels high)
   const int32_t depthTenths = static_cast<int32_t>(Depth * 10.0f + ((Depth >= 0.0f) ? 0.5f : -0.5f));
   const int32_t depthTenthsAbs = (depthTenths >= 0) ? depthTenths : -depthTenths;
   const uint16_t depthInteger = static_cast<uint16_t>(depthTenthsAbs / 10);
@@ -998,9 +974,9 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   const char *unitPart = "m";
   snprintf(integerPart, sizeof(integerPart), "%2u", depthInteger);
   snprintf(decimalPart, sizeof(decimalPart), "%u", depthDecimal);
-  constexpr uint8_t integerSize = 12;
+  constexpr uint8_t integerSize = 13;
   constexpr uint8_t decimalSize = 8;
-  constexpr uint8_t dotSize = 3;
+  constexpr uint8_t dotSize = 5;
   const char *dotPart = ".";
   int16_t x1 = 0;
   int16_t y1 = 0;
@@ -1020,8 +996,8 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.getTextBounds(unitPart, 0, 0, &x1, &y1, &unitW, &unitH);
   target.setTextSize(dotSize);
   target.getTextBounds(dotPart, 0, 0, &x1, &y1, &dotW, &dotH);
-  const int16_t depthX = 16;  // Top-left avoiding rounded edge
-  const int16_t depthY = 12;
+  const int16_t depthX = 0;  // Top-left
+  const int16_t depthY = 0;
   const int16_t depthBottom = depthY + static_cast<int16_t>(integerH);
   const int16_t dotX = depthX + static_cast<int16_t>(integerW) + 2;
   const int16_t dotY = depthBottom - static_cast<int16_t>(dotH) - 8;
@@ -1043,7 +1019,7 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextSize(decimalSize);
   target.setCursor(unitX, unitY);
   target.print(unitPart);
-  target.drawFastHLine(0, depthBottom + 2, 280, ST77XX_BLUE);  // Depth - Time/Heading seperator
+  target.drawFastHLine(0, depthBottom + 2, LCD_Width, ST77XX_BLUE);  // Depth - Time/Heading seperator
   //Battery indicator at top-right
   drawBatteryIndicator(target, Battery_Percentage);
   // Current GF below battery
@@ -1053,9 +1029,9 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   } else {
     snprintf(gfStr, sizeof(gfStr), "60/85");
   }
-  target.setTextSize(1);
+  target.setTextSize(2);
   target.setTextColor(ripNtear_Mode ? ST77XX_RED : ST77XX_GREEN, ST77XX_BLACK);
-  target.setCursor(240, 24);
+  target.setCursor(260, 20);
   target.print(gfStr);
   // Timer at middle-left
   char timerString[8];
@@ -1063,46 +1039,42 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   target.setTextSize(4);
   if (Stopwatch_Active) {
     target.setTextColor(ST77XX_GREEN, ST77XX_RED);  // Red background for stopwatch
-    target.fillRect(0, 115, 144, 3, ST77XX_RED);  // Top padding
-    target.fillRect(144, 115, 16, 35, ST77XX_RED); // Right padding
+    target.fillRect(0, 111, 180, 4, ST77XX_RED);  // Top padding
+    target.fillRect(144, 111, 16, 35, ST77XX_RED); // Right padding
   } else {
     target.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
   }
-  target.setCursor(0, 118);
+  target.setCursor(0, 114);
   target.print(timerString);
-  target.drawFastVLine(166, depthBottom + 3, 44, ST77XX_BLUE);  // Time - Heading seperator
+  target.drawFastVLine(190, depthBottom + 3, 44, ST77XX_BLUE);  // Time - Heading seperator
   // Heading at middle-right
-  drawHeadingValue(target, 118, Heading);
+  drawHeadingValue(target, 236, 114, 4, Heading);
   // Deco table below between Timer/Heading and Compass
-  target.drawFastHLine(0, 155, 280, ST77XX_BLUE);  // Top line
-  target.drawFastHLine(0, 196, 280, ST77XX_BLUE);  // Bottom line
-  target.drawFastVLine(0, 156, 40, ST77XX_BLUE);  // Left edge
-  target.drawFastVLine(70, 156, 40, ST77XX_BLUE);  // Column 1/2
-  target.drawFastVLine(140, 156, 40, ST77XX_BLUE);  // Column 2/3
-  target.drawFastVLine(210, 156, 40, ST77XX_BLUE);  // Column 3/4
-  target.drawFastVLine(279, 156, 40, ST77XX_BLUE);  // Right edge
-  constexpr int16_t leftColX = 1;
-  constexpr int16_t rightColX = 141;
-  constexpr int16_t cellW = 68;
-  constexpr int16_t topTitleY = 128;
-  target.setTextSize(2);
+  target.drawFastHLine(0, 151, LCD_Width, ST77XX_BLUE);  // Top line
+  target.drawFastHLine(0, 196, LCD_Width, ST77XX_BLUE);  // Bottom line
+  target.drawFastVLine(0, 152, 40, ST77XX_BLUE);  // Left edge
+  target.drawFastVLine(79, 152, 40, ST77XX_BLUE);  // Column 1/2
+  target.drawFastVLine(159, 152, 40, ST77XX_BLUE);  // Column 2/3
+  target.drawFastVLine(239, 152, 40, ST77XX_BLUE);  // Column 3/4
+  target.drawFastVLine(319, 152, 40, ST77XX_BLUE);  // Right edge
+  target.setTextSize(3);
   target.setTextColor(ST77XX_CYAN);
-  target.setCursor(8, 169);
+  target.setCursor(8, 165);
   target.print("D");  // Depth
-  target.setCursor(78, 169);
+  target.setCursor(88, 165);
   target.print("S");  // Stop
-  target.setTextSize(1);
-  target.setCursor(148, 162);
+  target.setTextSize(2);
+  target.setCursor(168, 154);
   target.print("T");  // TTS
-  target.setCursor(148, 172);
+  target.setCursor(168, 169);
   target.print("T");
-  target.setCursor(148, 182);
+  target.setCursor(168, 184);
   target.print("S");
-  target.setCursor(218, 162);
+  target.setCursor(248, 154);
   target.print("s");  // sGF
-  target.setCursor(218, 172);
+  target.setCursor(248, 169);
   target.print("G");
-  target.setCursor(218, 182);
+  target.setCursor(248, 184);
   target.print("F");
   uint16_t surfGfColor = ST77XX_GREEN;
   if (deco.surfGF > 100) {
@@ -1115,17 +1087,17 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
   snprintf(timeStr, sizeof(timeStr), "%3u", deco.stopTime);
   snprintf(ttsStr, sizeof(ttsStr), "%3u", deco.timeToSurface);
   snprintf(sGfStr, sizeof(sGfStr), "%3u", deco.surfGF);
-  drawColCentreText(target, stopStr, 28, 36, 169, 2, ST77XX_WHITE);  // First stop depth (m)
-  drawColCentreText(target, timeStr, 98, 36, 169, 2, ST77XX_WHITE);  // First stop time (min)
-  drawColCentreText(target, ttsStr, 166, 36, 169, 2, ST77XX_WHITE);  // Time to surface (min)
-  drawColCentreText(target, sGfStr, 236, 36, 169, 2, surfGfColor);  // Surface GF (%)
+  drawColCentreText(target, stopStr, 16, 54, 165, 3, ST77XX_WHITE);  // First stop depth (m)
+  drawColCentreText(target, timeStr, 96, 54, 165, 3, ST77XX_WHITE);  // First stop time (min)
+  drawColCentreText(target, ttsStr, 176, 54, 165, 3, ST77XX_WHITE);  // Time to surface (min)
+  drawColCentreText(target, sGfStr, 256, 54, 165, 3, surfGfColor);  // Surface GF (%)
   // Compass banner at the bottom
   drawCompassBanner(target, Heading);
 }
 
-  // Show Image
+  // Show Startup Image
   void showImage() {
-    const uint16_t w = 280;
+    const uint16_t w = 320;
     const uint16_t h = 240;
     const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
     uint16_t *buf = static_cast<uint16_t *>(heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -1143,36 +1115,122 @@ void updateDisplay(Adafruit_GFX &target, float Depth, int Minutes, int Seconds, 
     free(buf);
   }
 
+  // Find JPEG Files
+  bool hasJpegExtension(const String &name) {
+    return name.endsWith(".jpg") || name.endsWith(".JPG") || name.endsWith(".jpeg") || name.endsWith(".JPEG");
+  }
+  bool findFirstJpegOnSd(String &pathOut) {
+    File root = SD.open("/");
+    if (!root || !root.isDirectory()) {
+      return false;
+    }
+    File entry = root.openNextFile();
+    while (entry) {
+      if (!entry.isDirectory()) {
+        String name = String(entry.name());
+        if (hasJpegExtension(name)) {
+          if (!name.startsWith("/")) {
+            name = "/" + name;
+          }
+          pathOut = name;
+          entry.close();
+          root.close();
+          return true;
+        }
+      }
+      entry.close();
+      entry = root.openNextFile();
+    }
+    root.close();
+    return false;
+  }
+
+  // SD Card Initialisation and JPEG Decode
+  bool jpegOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
+    display.startWrite();
+    display.setAddrWindow(x, y, w, h);
+    display.writePixels(bitmap, static_cast<uint32_t>(w) * static_cast<uint32_t>(h), true, false);
+    display.endWrite();
+    return true;
+  }
+  bool initSdJpegSource() {
+    if (!SD.begin(SD_CS_Pin, spi)) {
+      return false;
+    }
+    String jpgPath;
+    if (!findFirstJpegOnSd(jpgPath)) {
+      return false;
+    }
+    uint16_t jpgW = 0;
+    uint16_t jpgH = 0;
+    if (TJpgDec.getSdJpgSize(&jpgW, &jpgH, jpgPath) != JDR_OK) {
+      return false;
+    }
+    if (jpgW != LCD_Width || jpgH != LCD_Height) {
+      return false;
+    }
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setSwapBytes(true);
+    TJpgDec.setCallback(jpegOutputCallback);
+    Sd_Jpeg_Path = jpgPath;
+    return true;
+  }
+
+  // Display JPEG Image
+  void showSdJpeg() {
+    if (!Sd_Jpeg_Ready) {
+      if (Display_Task_Handle != nullptr) {
+        vTaskSuspend(Display_Task_Handle);
+      }
+      display.fillScreen(ST77XX_BLACK);
+      drawCentreText("No Image", 104, 3, ST77XX_RED);
+      delay(Message_MS);
+      if (Display_Task_Handle != nullptr) {
+        vTaskResume(Display_Task_Handle);
+      }
+      Frame_Have_Previous = false;
+      return;
+    }
+    if (Display_Task_Handle != nullptr) {
+      vTaskSuspend(Display_Task_Handle);
+    }
+    display.fillScreen(ST77XX_BLACK);
+    const JRESULT decodeResult = TJpgDec.drawSdJpg(0, 0, Sd_Jpeg_Path);
+    if (decodeResult == JDR_OK) {
+      delay(Message_MS * 3);
+    } else {
+      display.fillScreen(ST77XX_BLACK);
+      drawCentreText("Image Error", 104, 3, ST77XX_RED);
+      delay(Message_MS);
+    }
+    display.fillScreen(ST77XX_BLACK);
+    if (Display_Task_Handle != nullptr) {
+      vTaskResume(Display_Task_Handle);
+    }
+    Frame_Have_Previous = false;
+  }
+
 
 void setup() {
   // Power on
-  pinMode(Button_Pin, INPUT);
-  pinMode(Boot_Pin, INPUT);
-  pinMode(Power_Pin, OUTPUT);
+  pinMode(Button_Pin, INPUT_PULLUP);
+  pinMode(RST_Pin, INPUT);
   pinMode(Backlight_Pin, OUTPUT);
-  digitalWrite(Power_Pin, HIGH);  // Power initially on
   digitalWrite(Backlight_Pin, LOW);  // Backlight initially off
   delay(10);
   bool buttonHeld = true;
   const uint32_t Boot_Time_MS = millis();
   while ((millis() - Boot_Time_MS) < Button_Long_MS) {
-    if (digitalRead(Button_Pin) != LOW) {
+    if (digitalRead(Button_Pin) == HIGH) {
       buttonHeld = false;
       break;
     }
     delay(10);
   }
   if (!buttonHeld) {
-    digitalWrite(Power_Pin, LOW);
-    delay(100);  // Power off if button not held
-    USB_Powered = true;  // USB powered if program continues
-  } else {
-    USB_Powered = false;
+    esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
+    esp_deep_sleep_start();  // Deep sleep if button not held at startup
   }
-
-  // Buzzer
-  pinMode(Buzz_Pin, OUTPUT);
-  digitalWrite(Buzz_Pin, LOW);  // Buzzer initially off
 
   // Power conservation
   esp_wifi_stop();
@@ -1190,47 +1248,25 @@ void setup() {
   analogSetAttenuation(ADC_11db);  // 2.5V range
 
   // Display initialisation
-  spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
+  spi.begin(SCK_Pin, -1, MOSI_Pin, LCD_CS_Pin);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setSPISpeed(40000000);  // 40 MHz SPI clockspeed
   display.setRotation(1);  // Rotate to landscape
-
-  // Initial screen
-  display.fillScreen(ST77XX_BLACK);  // Clear screen before backlight on
+  display.fillScreen(ST77XX_BLACK);
   analogWrite(Backlight_Pin, Backlight_High);
-  if (USB_Powered) {
-    drawCentreText("Charging", 50, 5, ST77XX_GREEN);
-    uint32_t lastUpdate = 0;
-    for (;;) {
-      const uint32_t now = millis();
-      if ((now - lastUpdate) >= 1000) {
-        lastUpdate = now;
-        Battery_Percentage = readBatteryPercentage();
-        char battStr[5];
-        snprintf(battStr, sizeof(battStr), "%u%%", Battery_Percentage);
-        display.fillRect(40, 120, 200, 64, ST77XX_BLACK);
-        drawCentreText(battStr, 120, 8, ST77XX_CYAN);  // Show battery percentage while charging
-      }
-      if (digitalRead(Button_Pin) == LOW) {
-        USB_Powered = false;
-        display.fillScreen(ST77XX_BLACK);
-        break;  // Exit charging screen if button pressed
-      }
-      delay(50);
-    }
-  }
   showImage();  // Show startup image
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
+
+  // SD card initialisation
+  Sd_Jpeg_Ready = initSdJpegSource();
 
   // MS5837 initialisation if not in demo mode
   loadDemoMode();
   Simulated_Profile_Start_MS = millis();
   if (!Demo_Mode) {
     // Power MS5837
-    pinMode(Sensor_GND_Pin, OUTPUT);
     pinMode(Sensor_VCC_Pin, OUTPUT);
-    digitalWrite(Sensor_GND_Pin, LOW);
     digitalWrite(Sensor_VCC_Pin, HIGH);
     delay(10);
     // MS5837 dedicated I2C initialisation
@@ -1309,7 +1345,7 @@ void setup() {
         }
       },
       "DisplayTask",
-      8192,  // Stack size
+      12288,  // Stack size 12 KB
       nullptr,
       2,  // Priority 2
       &Display_Task_Handle,
@@ -1324,7 +1360,6 @@ void setup() {
         uint64_t lastDepthUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          serviceBuzzer(nowMS);
           // 100 Hz tasks
           if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
             lastButtonUpdateMS = nowMS;
@@ -1332,12 +1367,8 @@ void setup() {
             // Press button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
-              // Long press toggles stopwatch
-              if (Stopwatch_Active) {
-                stopAndResetStopwatch();
-              } else {
-                startStopwatch(nowMS);
-              }
+              // Long press to display image from SD card
+              showSdJpeg();
             } else if (buttonEvent == PressButtonEvent::HoldPress) {
               if (Depth >= Dive_Start_Depth) {
                 // Hold button to change GF underwater
@@ -1345,20 +1376,25 @@ void setup() {
                 ripNtear(ripNtear_Mode);
                 Deco_Last_Update_MS = nowMS - Deco_Update_MS;
               } else {
-                // Hold button to power off on surface
+                // Hold button to deep sleep on surface
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
                 display.fillScreen(ST77XX_BLACK);
-                drawCentreText("Power", 75, 4, ST77XX_CYAN);
+                drawCentreText("Deep", 75, 4, ST77XX_CYAN);
                 drawCentreText("Off", 135, 4, ST77XX_CYAN);
                 delay(Message_MS);
                 display.fillScreen(ST77XX_BLACK);
-                digitalWrite(Power_Pin, LOW);
+                esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
+                esp_deep_sleep_start();
               }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
-              // Short press sounds buzzer
-              buzzer(nowMS);
+              // Short press toggles stopwatch
+              if (Stopwatch_Active) {
+                stopAndResetStopwatch();
+              } else {
+                startStopwatch(nowMS);
+              }
             }
             // Boot button detection
             const BootButtonEvent bootEvent = checkBootButton(nowMS);
@@ -1373,10 +1409,10 @@ void setup() {
               drawCentreText("Demo", 75, 4, ST77XX_CYAN);
               drawCentreText(Demo_Mode ? "On" : "Off", 135, 4, ST77XX_CYAN);
               delay(Message_MS);
-              digitalWrite(Power_Pin, LOW);
+              esp_restart();  // Restart after mode change
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
-                // Short press underwater to power off (shut down in case of MS5837 error)
+                // Short press underwater to deep sleep (shut down in case of MS5837 error)
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
@@ -1385,7 +1421,8 @@ void setup() {
                 drawCentreText("Off", 135, 4, ST77XX_CYAN);
                 delay(Message_MS);
                 display.fillScreen(ST77XX_BLACK);
-                digitalWrite(Power_Pin, LOW);
+                esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
+                esp_deep_sleep_start();
               } else {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
@@ -1407,7 +1444,7 @@ void setup() {
                 drawCalibrationScore();
                 delay(Message_MS * 3);
                 display.fillScreen(ST77XX_BLACK);
-                digitalWrite(Power_Pin, LOW);
+                esp_restart();  // Restart after calibration
               }
             }
             // Compass reading
@@ -1456,7 +1493,8 @@ void setup() {
               drawCentreText("Low", 144, 4, ST77XX_RED);
               delay(Message_MS);
               display.fillScreen(ST77XX_BLACK);
-              digitalWrite(Power_Pin, LOW);  // Critical battery shut down
+              esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
+              esp_deep_sleep_start();  // Critical battery shut down
             }
             // 0.2 Hz tasks
             if ((nowMS - Deco_Last_Update_MS) >= Deco_Update_MS) {
@@ -1474,7 +1512,7 @@ void setup() {
         }
       },
       "SensorTask",
-      12288,  // Stack size
+      32768,  // Stack size 32 KB
       nullptr,
       2,  // Priority 2
       &Sensor_Task_Handle,
