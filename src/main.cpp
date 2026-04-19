@@ -31,7 +31,7 @@
 #include "image.h"
 #include "compass_label.h"
 
-// Pins
+// Pin Definitions
 // System
 constexpr uint8_t RST_Pin = 0;  // Boot button/ LCD reset
 constexpr uint8_t Battery_Pin = 5;  // Battery ADC
@@ -1279,28 +1279,34 @@ void showSpiffsJpeg() {
 
 // Power Off
 void powerOff() {
-  digitalWrite(Backlight_Pin, LOW);  // Turn off backlight
-  rtc_gpio_init(gpio_num_t(Backlight_Pin));
-  rtc_gpio_set_direction(gpio_num_t(Backlight_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
-  rtc_gpio_set_level(gpio_num_t(Backlight_Pin), 0);  // RTC backlight stays off
-  digitalWrite(VCC_Pin, LOW);  // Turn off BH1750/QMC5883P/MS5837 power
-  rtc_gpio_init(gpio_num_t(VCC_Pin));
-  rtc_gpio_set_direction(gpio_num_t(VCC_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
-  rtc_gpio_set_level(gpio_num_t(VCC_Pin), 0);
-   rtc_gpio_pullup_dis(gpio_num_t(VCC_Pin));
-  rtc_gpio_pulldown_en(gpio_num_t(VCC_Pin));  // RTC sensor power stays off
-  rtc_gpio_init(gpio_num_t(Button_Pin));  // Set button pin RTC input pullup
-  rtc_gpio_set_direction(gpio_num_t(Button_Pin), RTC_GPIO_MODE_INPUT_ONLY);
-  rtc_gpio_pullup_en(gpio_num_t(Button_Pin));
-  rtc_gpio_pulldown_dis(gpio_num_t(Button_Pin));
-  esp_sleep_enable_ext0_wakeup(gpio_num_t(Button_Pin), 0);  // Wake up on low
-  esp_deep_sleep_start();  // Deep sleep
+  // LCD backlight
+  digitalWrite(Backlight_Pin, LOW);
+  rtc_gpio_init(static_cast<gpio_num_t>(Backlight_Pin));
+  rtc_gpio_set_direction(static_cast<gpio_num_t>(Backlight_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(static_cast<gpio_num_t>(Backlight_Pin), 0);
+  rtc_gpio_hold_en(static_cast<gpio_num_t>(Backlight_Pin));
+  // BH1750/QMC5883P/MS5837 power
+  digitalWrite(VCC_Pin, LOW);
+  rtc_gpio_init(static_cast<gpio_num_t>(VCC_Pin));
+  rtc_gpio_set_direction(static_cast<gpio_num_t>(VCC_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(static_cast<gpio_num_t>(VCC_Pin), 0);
+  rtc_gpio_hold_en(static_cast<gpio_num_t>(VCC_Pin));
+  // Button
+  rtc_gpio_init(static_cast<gpio_num_t>(Button_Pin));
+  rtc_gpio_set_direction(static_cast<gpio_num_t>(Button_Pin), RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_en(static_cast<gpio_num_t>(Button_Pin));
+  rtc_gpio_pulldown_dis(static_cast<gpio_num_t>(Button_Pin));
+  esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(Button_Pin), 0);
+  delay(10);
+  esp_deep_sleep_start();
 }
 
 void setup() {
   // Power on
   pinMode(Button_Pin, INPUT_PULLUP);
   pinMode(RST_Pin, INPUT);
+  rtc_gpio_isolate(static_cast<gpio_num_t>(GND_Pin));
+  rtc_gpio_hold_dis(static_cast<gpio_num_t>(Backlight_Pin));
   pinMode(Backlight_Pin, OUTPUT);
   digitalWrite(Backlight_Pin, LOW);  // Backlight initially off
   delay(10);
@@ -1344,6 +1350,7 @@ void setup() {
   display.fillScreen(ST77XX_BLACK);
 
   // I2C initialisation
+  rtc_gpio_hold_dis(static_cast<gpio_num_t>(VCC_Pin));
   pinMode(VCC_Pin, OUTPUT);
   digitalWrite(VCC_Pin, HIGH);
   delay(10);
