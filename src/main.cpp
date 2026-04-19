@@ -1,13 +1,12 @@
 #include <Arduino.h>
 // Power Management
+#include <esp_pm.h>
 #include <esp_bt.h>
 #include <esp_wifi.h>
+#include <esp_sleep.h>
 #include <esp_heap_caps.h>
-#include <esp_pm.h>
+#include <driver/rtc_io.h>
 // Peripherals
-#include <WebServer.h>
-#include <SPIFFS.h>
-#include <WiFi.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <BH1750.h>
@@ -17,50 +16,47 @@
 #include <SensorQMI8658.hpp>
 #include <SensorQMC5883P.hpp>
 // Data Processing
-#include <Preferences.h>
 #include <vector>
+#include <WiFi.h>
 #include <ZHL16C.h>
+#include <SPIFFS.h>
+#include <pgmspace.h>
+#include <WebServer.h>
+#include <Preferences.h>
 #include <TJpg_Decoder.h>
 #include <Adafruit_AHRS.h>
 #include <magnetometer_calibration.h>
 // Header Files
-#include <pgmspace.h>
 #include "demo.h"
 #include "image.h"
 #include "compass_label.h"
 
 // Pins
 // System
-constexpr gpio_num_t RST_Pin = GPIO_NUM_0;  // Boot button/ LCD reset
-constexpr gpio_num_t Battery_Pin = GPIO_NUM_5;  // Battery ADC
+constexpr uint8_t RST_Pin = 0;  // Boot button/ LCD reset
+constexpr uint8_t Battery_Pin = 5;  // Battery ADC
 // Button
-constexpr gpio_num_t Button_Pin = GPIO_NUM_9;  // Connect to GND
-// IMU/BH1750 I2C
-constexpr gpio_num_t IMU_INT_Pin = GPIO_NUM_3;  // Internal
-constexpr gpio_num_t QMC_DRDY_Pin = GPIO_NUM_11;
-constexpr gpio_num_t GND_Pin = GPIO_NUM_13;
-constexpr gpio_num_t VCC_Pin = GPIO_NUM_15;
-constexpr gpio_num_t SCL_Pin = GPIO_NUM_47;  // Fixed
-constexpr gpio_num_t SDA_Pin = GPIO_NUM_48;  // Fixed
-// MS5837 I2C
-constexpr gpio_num_t Sensor_VCC_Pin = GPIO_NUM_4;
-constexpr gpio_num_t Sensor_GND_Pin = GPIO_NUM_6;
-constexpr gpio_num_t Sensor_SCL_Pin = GPIO_NUM_16;
-constexpr gpio_num_t Sensor_SDA_Pin = GPIO_NUM_17;
+constexpr uint8_t Button_Pin = 9;  // Connect to GND
+// I2C
+constexpr uint8_t IMU_INT_Pin = 3;  // Internal
+constexpr uint8_t QMC_DRDY_Pin = 11;
+constexpr uint8_t GND_Pin = 13;  // Grounded
+constexpr uint8_t VCC_Pin = 15;
+constexpr uint8_t SCL_Pin = 47;  // Fixed
+constexpr uint8_t SDA_Pin = 48;  // Fixed
 // LCD (internal)
-constexpr gpio_num_t Backlight_Pin = GPIO_NUM_1;
-constexpr gpio_num_t MOSI_Pin = GPIO_NUM_38;
-constexpr gpio_num_t SCK_Pin = GPIO_NUM_39;
-constexpr gpio_num_t MISO_Pin = GPIO_NUM_40;
-constexpr gpio_num_t SD_CS_Pin = GPIO_NUM_41;  // SD card CS
-constexpr gpio_num_t DC_Pin = GPIO_NUM_42;
-constexpr gpio_num_t LCD_CS_Pin = GPIO_NUM_45;  // LCD CS
+constexpr uint8_t Backlight_Pin = 1;
+constexpr uint8_t MOSI_Pin = 38;
+constexpr uint8_t SCK_Pin = 39;
+constexpr uint8_t MISO_Pin = 40;
+constexpr uint8_t SD_CS_Pin = 41;  // SD card CS
+constexpr uint8_t DC_Pin = 42;
+constexpr uint8_t LCD_CS_Pin = 45;  // LCD CS
 
 // Objects
 SPIClass spi(FSPI);
 Adafruit_ST7789 display(&spi, LCD_CS_Pin, DC_Pin, RST_Pin);
 Preferences prefs;
-TwoWire sensorWire(1);
 MS5837 sensor;
 BH1750 lightMeter;
 SensorQMI8658 qmi;
@@ -1283,16 +1279,22 @@ void showSpiffsJpeg() {
 
 // Power Off
 void powerOff() {
-  display.fillScreen(ST77XX_BLACK);
-  drawCentreText("Power", 75, 4, ST77XX_CYAN);
-  drawCentreText("Off", 135, 4, ST77XX_CYAN);
-  delay(Message_MS);
-  display.fillScreen(ST77XX_BLACK);
-  digitalWrite(Backlight_Pin, LOW);
-  digitalWrite(Sensor_VCC_Pin, LOW);
-  digitalWrite(VCC_Pin, LOW);
-  esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
-  esp_deep_sleep_start();
+  digitalWrite(Backlight_Pin, LOW);  // Turn off backlight
+  rtc_gpio_init(gpio_num_t(Backlight_Pin));
+  rtc_gpio_set_direction(gpio_num_t(Backlight_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(gpio_num_t(Backlight_Pin), 0);  // RTC backlight stays off
+  digitalWrite(VCC_Pin, LOW);  // Turn off BH1750/QMC5883P/MS5837 power
+  rtc_gpio_init(gpio_num_t(VCC_Pin));
+  rtc_gpio_set_direction(gpio_num_t(VCC_Pin), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(gpio_num_t(VCC_Pin), 0);
+   rtc_gpio_pullup_dis(gpio_num_t(VCC_Pin));
+  rtc_gpio_pulldown_en(gpio_num_t(VCC_Pin));  // RTC sensor power stays off
+  rtc_gpio_init(gpio_num_t(Button_Pin));  // Set button pin RTC input pullup
+  rtc_gpio_set_direction(gpio_num_t(Button_Pin), RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_en(gpio_num_t(Button_Pin));
+  rtc_gpio_pulldown_dis(gpio_num_t(Button_Pin));
+  esp_sleep_enable_ext0_wakeup(gpio_num_t(Button_Pin), 0);  // Wake up on low
+  esp_deep_sleep_start();  // Deep sleep
 }
 
 void setup() {
@@ -1312,8 +1314,7 @@ void setup() {
     delay(10);
   }
   if (!buttonHeld) {
-    esp_sleep_enable_ext0_wakeup(Button_Pin, 0);
-    esp_deep_sleep_start();  // Deep sleep if button not held at startup
+    powerOff();
   }
 
   // Power conservation
@@ -1335,47 +1336,31 @@ void setup() {
   spi.begin(SCK_Pin, -1, MOSI_Pin, LCD_CS_Pin);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setSPISpeed(40000000);  // 40 MHz SPI clockspeed
-  display.setRotation(1);  // Rotate to landscape
+  // display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
   analogWrite(Backlight_Pin, Backlight_High);
   showImage();  // Show startup image
   delay(Message_MS);
   display.fillScreen(ST77XX_BLACK);
 
-  // SPIFFS initialisation
-  Spiffs_Jpeg_Ready = initSpiffsJpegSource();
+  // I2C initialisation
+  pinMode(VCC_Pin, OUTPUT);
+  digitalWrite(VCC_Pin, HIGH);
+  delay(10);
+  Wire.begin(SDA_Pin, SCL_Pin);
+  Wire.setClock(400000);  // 400 kHz I2C clcokspeed
+  delay(10);
 
   // MS5837 initialisation if not in demo mode
   loadDemoMode();
   Simulated_Profile_Start_MS = millis();
   if (!Demo_Mode) {
-    // Power MS5837
-    pinMode(Sensor_VCC_Pin, OUTPUT);
-    pinMode(Sensor_GND_Pin, OUTPUT);
-    digitalWrite(Sensor_VCC_Pin, HIGH);
-    digitalWrite(Sensor_GND_Pin, LOW);
-    delay(10);
-    // MS5837 dedicated I2C initialisation
-    sensorWire.begin(Sensor_SDA_Pin, Sensor_SCL_Pin);
-    sensorWire.setClock(400000);  // 400 kHz I2C clcokspeed
-    delay(10);
-    // MS5837 initialisation
-    sensorAvailable = sensor.init(sensorWire);  // Detect MS5837 presence
+    sensorAvailable = sensor.init();  // Detect MS5837 presence
     if (sensorAvailable) {
       sensor.setModel(MS5837::MS5837_30BA);  // 30 bar model
       sensor.setFluidDensity(Density);  // Set fluid density
     }
   }
-
-  // Peripheral I2C initialisation
-  pinMode(VCC_Pin, OUTPUT);
-  pinMode(GND_Pin, OUTPUT);
-  digitalWrite(VCC_Pin, HIGH);
-  digitalWrite(GND_Pin, LOW);
-  delay(10);
-  Wire.begin(SDA_Pin, SCL_Pin);
-  Wire.setClock(400000);  // 400 kHz I2C clcokspeed
-  delay(10);
 
   // BH1750 initialisation
   lightMeter.begin(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_I2C_Address, &Wire);  // 4 lux resolution, 16 ms conversion time
@@ -1411,6 +1396,9 @@ void setup() {
     delay(Message_MS);
     display.fillScreen(ST77XX_BLACK);
   }
+
+  // SPIFFS initialisation
+  Spiffs_Jpeg_Ready = initSpiffsJpegSource();
 
   // Display update on core 1 at 20 Hz
   xTaskCreatePinnedToCore(
@@ -1459,6 +1447,9 @@ void setup() {
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
               // Long press to display image from SPIFFS
+              if (Display_Task_Handle != nullptr) {
+                  vTaskSuspend(Display_Task_Handle);
+                }
               showSpiffsJpeg();
             } else if (buttonEvent == PressButtonEvent::HoldPress) {
               if (Depth >= Dive_Start_Depth) {
@@ -1471,6 +1462,11 @@ void setup() {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Power", 75, 4, ST77XX_CYAN);
+                drawCentreText("Off", 135, 4, ST77XX_CYAN);
+                delay(Message_MS);
+                display.fillScreen(ST77XX_BLACK);
                 powerOff();
               }
             } else if (buttonEvent == PressButtonEvent::ShortPress) {
@@ -1504,12 +1500,17 @@ void setup() {
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
+                display.fillScreen(ST77XX_BLACK);
+                drawCentreText("Power", 75, 4, ST77XX_CYAN);
+                drawCentreText("Off", 135, 4, ST77XX_CYAN);
+                delay(Message_MS);
+                display.fillScreen(ST77XX_BLACK);
                 powerOff();
               } else {
+                // Short press on surface to start compass calibration
                 if (Display_Task_Handle != nullptr) {
                   vTaskSuspend(Display_Task_Handle);
                 }
-                // Short press on surface to start compass calibration
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Compass", 75, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 135, 4, ST77XX_WHITE);
