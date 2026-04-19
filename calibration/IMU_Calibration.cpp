@@ -1,16 +1,18 @@
 #include <Arduino.h>
 // Power Management
+#include <esp_pm.h>
 #include <esp_bt.h>
 #include <esp_wifi.h>
+#include <esp_sleep.h>
 #include <esp_heap_caps.h>
-#include <esp_pm.h>
+#include <driver/rtc_io.h>
 // Peripherals
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
-#include <SensorQMC5883P.hpp>
 #include <SensorQMI8658.hpp>
+#include <SensorQMC5883P.hpp>
 // Data Processing
 #include <vector>
 #include <WiFi.h>
@@ -34,56 +36,58 @@ bool collection_complete = false;
 bool collection_start_pending = false;
 uint32_t collection_start_ms = 0;
 uint32_t collection_pending_since_ms = 0;
-constexpr uint32_t COLLECTION_DURATION_MS = 60000;    // 60 seconds
-constexpr uint32_t COLLECTION_START_DELAY_MS = 5000;  // 5 seconds
-constexpr uint32_t COLLECTION_SAMPLE_PERIOD_MS = 10;  // 100 Hz
+constexpr uint32_t COLLECTION_DURATION_MS = 120000;    // 120 seconds
+constexpr uint32_t COLLECTION_START_DELAY_MS = 5000;   // 5 seconds
+constexpr uint32_t COLLECTION_SAMPLE_PERIOD_MS = 20;   // 50 Hz
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
 WebServer server(80);
 
-// Pins
-constexpr uint8_t Boot_Pin = 0;
-constexpr uint8_t Battery_Pin = 1;
-constexpr uint8_t DC_Pin = 4;
-constexpr uint8_t CS_Pin = 5;
-constexpr uint8_t SCK_Pin = 6;
-constexpr uint8_t MOSI_Pin = 7;
-constexpr uint8_t RST_Pin = 8;
-constexpr uint8_t Backlight_Pin = 15;
-constexpr uint8_t SCL_Pin = 10;
-constexpr uint8_t SDA_Pin = 11;
-constexpr uint8_t Sensor_VCC_Pin = 3;
-constexpr uint8_t Sensor_GND_Pin = 16;
-constexpr uint8_t Sensor_SCL_Pin = 17;
-constexpr uint8_t Sensor_SDA_Pin = 18;
-constexpr uint8_t Button_Pin = 40;
-constexpr uint8_t Power_Pin = 41;
-constexpr uint8_t Buzz_Pin = 42;
+// Pin Definitions
+// System
+constexpr uint8_t RST_Pin = 0;  // Boot button/ LCD reset
+constexpr uint8_t Battery_Pin = 5;  // Battery ADC
+// Button
+constexpr uint8_t Button_Pin = 9;  // Connect to GND
+// I2C
+constexpr uint8_t IMU_INT_Pin = 3;  // Internal
+constexpr uint8_t QMC_DRDY_Pin = 11;
+constexpr uint8_t GND_Pin = 13;  // Grounded
+constexpr uint8_t VCC_Pin = 15;
+constexpr uint8_t SCL_Pin = 47;  // Fixed
+constexpr uint8_t SDA_Pin = 48;  // Fixed
+// LCD (internal)
+constexpr uint8_t Backlight_Pin = 1;
+constexpr uint8_t MOSI_Pin = 38;
+constexpr uint8_t SCK_Pin = 39;
+constexpr uint8_t MISO_Pin = 40;
+constexpr uint8_t SD_CS_Pin = 41;  // SD card CS
+constexpr uint8_t DC_Pin = 42;
+constexpr uint8_t LCD_CS_Pin = 45;  // LCD CS
 
 
 // Define Objects
 SPIClass spi(FSPI);
 SensorQMC5883P qmc;
 SensorQMI8658 qmi;
-Adafruit_ST7789 display(&spi, CS_Pin, DC_Pin, RST_Pin);
+Adafruit_ST7789 display(&spi, LCD_CS_Pin, DC_Pin, RST_Pin);
 
 // I2C Addresses
 constexpr uint8_t QMC5883P_I2C_Address = 0x2C;
 constexpr uint8_t QMI8658_I2C_Address = 0x6B;
 
 // LCD Constants
-constexpr uint16_t LCD_Width = 260;
-constexpr uint16_t LCD_Height = 280;
+constexpr uint16_t LCD_Width = 320;
+constexpr uint16_t LCD_Height = 240;
 constexpr uint8_t Backlight_High = 255;
 constexpr uint32_t Display_Update_MS = 50;
-constexpr uint32_t Fast_Update_MS = 100;
 
 // IMU Constants
 constexpr float Accel_Offset_X = 0.0;
 constexpr float Accel_Offset_Y = 0.0f;
 constexpr float Accel_Offset_Z = 0.0f;
-constexpr float Gyro_Offset_X = 0.4791f;
-constexpr float Gyro_Offset_Y = 5.7993f;
-constexpr float Gyro_Offset_Z = -0.7015f;
+constexpr float Gyro_Offset_X = 0.0f;
+constexpr float Gyro_Offset_Y = 0.0f;
+constexpr float Gyro_Offset_Z = 0.0f;
 
 // Compass Constants
 constexpr float Compass_Offset = 0.0;                  // Compass offset degrees
@@ -92,11 +96,11 @@ constexpr float Magnetometer_Lsb_Per_Gauss = 3750.0f;  // QMC5883P at FS_8G: 375
 
 // Default Compass Calibration Matrix
 constexpr CompassCalibrationMatrices Default_Compass_Matrices = {
-  .hard_iron = {431.913489, 296.874488, 374.476474},
+  .hard_iron = {0.0f, 0.0f, 0.0f},
   .soft_iron = {
-    0.000330f, 0.000001f, -0.000020f,
-    0.000001f, 0.000308f, 0.000008f,
-    -0.000020f, 0.000008f, 0.000300f
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f
   },
   .reference_field_gauss = Reference_Field_Gauss,
   .lsb_per_gauss = Magnetometer_Lsb_Per_Gauss,
@@ -168,9 +172,9 @@ static void readQmcAxesTransformed(float out_mag[3]) {
   const float mx = static_cast<float>(mag_data.raw.x);
   const float my = static_cast<float>(mag_data.raw.y);
   const float mz = static_cast<float>(mag_data.raw.z);
-  out_mag[0] = -mx;  // Right = -QMC_X
-  out_mag[1] = -my;  // Down = -QMC_Y
-  out_mag[2] = -mz;  // Forward = -QMC_Z
+  out_mag[0] = mx;
+  out_mag[1] = my;
+  out_mag[2] = mz;
 }
 
 // Frame Buffer Management
@@ -178,16 +182,11 @@ static bool initFrameBuffers() {
   Render_Width = static_cast<uint16_t>(display.width());
   Render_Height = static_cast<uint16_t>(display.height());
   Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
-
   Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
-  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
-    return false;
-  }
+  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) return false;
   Frame_Back_Previous = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   Frame_Back_Current = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) {
-    return false;
-  }
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) return false;
   memset(Frame_Back_Previous, 0, Frame_Buffer_Bytes);
   memset(Frame_Back_Current, 0, Frame_Buffer_Bytes);
   Frame_Have_Previous = false;
@@ -196,9 +195,7 @@ static bool initFrameBuffers() {
 
 // Flush from PSRAM
 static void flushDirtyRectFromPSRAM() {
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
-    return;
-  }
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) return;
   uint16_t dirtyX0 = Render_Width;
   uint16_t dirtyY0 = Render_Height;
   uint16_t dirtyX1 = 0;
@@ -212,9 +209,7 @@ static void flushDirtyRectFromPSRAM() {
       for (uint16_t x = 0; x < Render_Width; ++x) {
         const size_t idx = rowOffset + static_cast<size_t>(x);
         if (Frame_Back_Current[idx] != Frame_Back_Previous[idx]) {
-          if (left < 0) {
-            left = static_cast<int16_t>(x);
-          }
+          if (left < 0) left = static_cast<int16_t>(x);
           right = static_cast<int16_t>(x);
         }
       }
@@ -289,10 +284,6 @@ void updateDisplay(Adafruit_GFX &target) {
     target.setCursor(10, 20);
     target.print("Data Ready");
     target.setTextSize(2);
-    target.setCursor(10, 80);
-    target.print("/g gyro dps");
-    target.setCursor(10, 100);
-    target.print("/a accel g");
     target.setCursor(10, 120);
     target.print("Samples:");
     target.print(samples_collected);
@@ -340,10 +331,6 @@ void updateDisplay(Adafruit_GFX &target) {
     target.setCursor(10, 226);
     target.print("Z:");
     target.print(live_mag_cal_z, 3);
-
-    target.setTextSize(2);
-    target.setCursor(190, 246);
-    target.print("dps/g/cal");
   }
 }
 
@@ -366,16 +353,14 @@ void handleGyroView() {
 
 void setup() {
   // Power on
-  pinMode(Power_Pin, OUTPUT);
-  digitalWrite(Power_Pin, HIGH);
+  rtc_gpio_isolate(static_cast<gpio_num_t>(GND_Pin));  // Isolate grounded pin
+  pinMode(VCC_Pin, OUTPUT);
+  digitalWrite(VCC_Pin, HIGH);
   delay(10);
-  pinMode(Button_Pin, INPUT);
-  // Boot time
+  pinMode(Button_Pin, INPUT_PULLUP);
   boot_time_ms = millis();
   
   // Power conservation
-  pinMode(Buzz_Pin, OUTPUT);
-  digitalWrite(Buzz_Pin, LOW);
   esp_bt_controller_disable();
   esp_pm_config_esp32s3_t pm_config = {
     .max_freq_mhz = 240,
@@ -385,12 +370,12 @@ void setup() {
   esp_pm_configure(&pm_config);
 
   // Display initialisation
-  spi.begin(SCK_Pin, -1, MOSI_Pin, CS_Pin);
+  spi.begin(SCK_Pin, -1, MOSI_Pin, LCD_CS_Pin);
   pinMode(Backlight_Pin, OUTPUT);
   analogWrite(Backlight_Pin, Backlight_High);
   display.init(LCD_Width, LCD_Height, SPI_MODE3);
   display.setSPISpeed(40000000); 
-  display.setRotation(1);
+  // display.setRotation(1);
   display.fillScreen(ST77XX_BLACK);
 
   // I2C initialisation
@@ -401,25 +386,15 @@ void setup() {
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.enableSyncSampleMode();
-  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS,
-                      SensorQMI8658::GYR_ODR_112_1Hz,
-                      SensorQMI8658::LPF_MODE_2);
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                          SensorQMI8658::ACC_ODR_125Hz,
-                          SensorQMI8658::LPF_MODE_2);
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_56_05Hz, SensorQMI8658::LPF_MODE_2);
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_62_5Hz, SensorQMI8658::LPF_MODE_2);
   qmi.enableGyroscope();
-  qmi.enableAccelerometer();
+  qmi.enableAccelerometer();  
 
   // QMC5883P initialisation
-  pinMode(Boot_Pin, INPUT);
+  pinMode(RST_Pin, INPUT);
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
-  qmc.configMagnetometer(
-      OperationMode::CONTINUOUS_MEASUREMENT,
-      MagFullScaleRange::FS_8G,
-      100.0f,
-      MagOverSampleRatio::OSR_8,
-      MagDownSampleRatio::DSR_8
-    );
+  qmc.configMagnetometer(OperationMode::CONTINUOUS_MEASUREMENT, MagFullScaleRange::FS_8G, 50.0f, MagOverSampleRatio::OSR_8, MagDownSampleRatio::DSR_8);  // ODR 50 Hz
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
   compassSetCalibrationMatrices(&Compass_Matrices);
 
@@ -433,7 +408,7 @@ void setup() {
   // Setup web server
   server.on("/", handleRootView);
   server.on("/m", handleMagView);
-  server.on("/m/c", handleMagCalView);
+  server.on("/mc", handleMagCalView);
   server.on("/a", handleAccelView);
   server.on("/g", handleGyroView);
   server.begin();
@@ -470,7 +445,7 @@ void setup() {
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
-        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Fast_Update_MS);
+        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Display_Update_MS);
         const TickType_t collectionPeriodTicks = pdMS_TO_TICKS(COLLECTION_SAMPLE_PERIOD_MS);
         uint64_t lastCollectionSampleMS = 0;
         for (;;) {
