@@ -80,13 +80,10 @@ constexpr uint8_t Backlight_Low = 8;               // Low backlight
 constexpr uint8_t Backlight_High = 255;            // High backlight
 constexpr uint32_t Message_MS = 3000;              // Display messages for 3 seconds
 constexpr uint32_t Display_Update_MS = 50;         // Display refresh rate: 20 Hz
-constexpr uint32_t Button_Update_MS = 10;          // Button checks and compass: 100 Hz
 constexpr uint32_t Depth_Update_MS = 500;          // Depth sensor and ADC updates: 2 Hz
 constexpr uint32_t Deco_Update_MS = 5000;          // Decompression model updates: 0.2 Hz
 
 // Button Constants
-constexpr uint32_t Button_Debounce_MS = 50;       // Button debounce time
-constexpr uint32_t Button_Short_MS = 799;         // Short press threshold
 constexpr uint32_t Button_Long_MS = 800;          // Long press threshold
 constexpr uint32_t Button_Hold_MS = 5000;         // Press and hold threshold
 constexpr uint32_t Calibration_Delay_MS = 10000;  // Delay before calibration
@@ -158,12 +155,13 @@ constexpr const char *Password = "12345678";
 // RTOS Variables
 TaskHandle_t Display_Task_Handle = nullptr;
 TaskHandle_t Sensor_Task_Handle = nullptr;
+TaskHandle_t Image_Task_Handle = nullptr;
 GFXcanvas16 *Frame_Canvas = nullptr;
 uint16_t *Frame_Back_Previous = nullptr;
 uint16_t *Frame_Back_Current = nullptr;
-size_t Frame_Buffer_Bytes = 0;
 uint16_t Render_Width = 0;
 uint16_t Render_Height = 0;
+size_t Frame_Buffer_Bytes = 0;
 bool Frame_Have_Previous = false;
 bool Spiffs_Jpeg_Ready = false;
 
@@ -192,6 +190,7 @@ uint8_t Battery_Percentage = 0;
 uint8_t Backlight_Level = Backlight_High;
 
 // Press Button Variables
+uint8_t Button_Consecutive_Reads = 0;
 uint8_t Button_Last_Reading = HIGH;
 uint8_t Button_Stable_State = HIGH;
 uint64_t Button_Last_Change_MS = 0;
@@ -200,6 +199,7 @@ bool Button_Long_Event_Fired = false;
 bool Button_Hold_Event_Fired = false;
 
 // Boot Button Variables
+uint8_t Boot_Consecutive_Reads = 0;
 uint8_t Boot_Last_Reading = HIGH;
 uint8_t Boot_Stable_State = HIGH;
 uint64_t Boot_Last_Change_MS = 0;
@@ -233,14 +233,10 @@ float compassCenterWeight(float projectedX, float centerX) {
   return smoothstep01(linearWeight);
 }
 void drawScaledXBitmap(Adafruit_GFX &target, int16_t x, int16_t y, uint8_t srcW, uint8_t srcH, const uint8_t *bitmap, float scale, uint16_t color) {
-  if (bitmap == nullptr || scale <= 0.0f) {
-    return;
-  }
+  if (bitmap == nullptr || scale <= 0.0f) return;
   const int16_t dstW = static_cast<int16_t>(srcW * scale + 0.5f);
   const int16_t dstH = static_cast<int16_t>(srcH * scale + 0.5f);
-  if (dstW <= 0 || dstH <= 0) {
-    return;
-  }
+  if (dstW <= 0 || dstH <= 0) return;
   const uint8_t bytesPerRow = static_cast<uint8_t>((srcW + 7) / 8);
   for (int16_t dy = 0; dy < dstH; ++dy) {
     const uint8_t sy = static_cast<uint8_t>((static_cast<int32_t>(dy) * srcH) / dstH);
@@ -249,9 +245,7 @@ void drawScaledXBitmap(Adafruit_GFX &target, int16_t x, int16_t y, uint8_t srcW,
       const uint16_t byteIndex = static_cast<uint16_t>(sy * bytesPerRow + (sx / 8));
       const uint8_t rowByte = pgm_read_byte(bitmap + byteIndex);
       const bool isSet = (rowByte & (1U << (sx & 7))) != 0;
-      if (isSet) {
-        target.drawPixel(x + dx, y + dy, color);
-      }
+      if (isSet) target.drawPixel(x + dx, y + dy, color);
     }
   }
 }
@@ -267,15 +261,11 @@ enum class CompassCalibrationMethod : uint8_t {
 CompassCalibrationMethod Last_Calibration_Method = CompassCalibrationMethod::None;
 static const char* compassCalibrationMethodText(CompassCalibrationMethod method) {
   switch (method) {
-    case CompassCalibrationMethod::Ellipsoid:
-      return "Ellipsoid";
-    case CompassCalibrationMethod::MinMax:
-      return "Min/Max";
-    case CompassCalibrationMethod::Error:
-      return "Error";
+    case CompassCalibrationMethod::Ellipsoid: return "Ellipsoid";
+    case CompassCalibrationMethod::MinMax: return "Min/Max";
+    case CompassCalibrationMethod::Error: return "Error";
     case CompassCalibrationMethod::None:
-    default:
-      return "None";
+    default: return "None";
   }
 }
 CompassCalibrationQuality Last_Calibration_Quality = {};
@@ -291,17 +281,12 @@ size_t Last_Calibration_Sample_Count = 0;
 uint32_t Last_Calibration_Elapsed_MS = 0;
 static const char* calibrationFailReasonText(CalibrationFailReason reason) {
   switch (reason) {
-    case CalibrationFailReason::TooFewSamples:
-      return "Too few samples";
-    case CalibrationFailReason::FitFailed:
-      return "Fit failed";
-    case CalibrationFailReason::ApplyFailed:
-      return "Apply failed";
-    case CalibrationFailReason::InvalidQuality:
-      return "Invalid quality";
+    case CalibrationFailReason::TooFewSamples: return "Too few samples";
+    case CalibrationFailReason::FitFailed: return "Fit failed";
+    case CalibrationFailReason::ApplyFailed: return "Apply failed";
+    case CalibrationFailReason::InvalidQuality: return "Invalid quality";
     case CalibrationFailReason::None:
-    default:
-      return "None";
+    default: return "None";
   }
 }
 
@@ -314,13 +299,18 @@ enum class PressButtonEvent : uint8_t {
 };
 PressButtonEvent checkButton(uint64_t nowMS) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(Button_Pin));
-  if (reading != Button_Last_Reading) {
-    Button_Last_Change_MS = nowMS;
-    Button_Last_Reading = reading;
-  }
   PressButtonEvent event = PressButtonEvent::None;
-  if ((nowMS - Button_Last_Change_MS) >= Button_Debounce_MS) {
-    if (reading != Button_Stable_State) {
+  if (reading == Button_Stable_State) {
+    Button_Consecutive_Reads = 0;
+  } else {
+    if (reading == Button_Last_Reading) {
+      if (Button_Consecutive_Reads < UINT8_MAX) Button_Consecutive_Reads++;
+    } else {
+      Button_Consecutive_Reads = 1;
+    }
+    Button_Last_Reading = reading;
+    if (Button_Consecutive_Reads >= 2) {
+      Button_Consecutive_Reads = 0;
       Button_Stable_State = reading;
       if (Button_Stable_State == LOW) {
         Button_Press_Start_MS = nowMS;
@@ -328,7 +318,7 @@ PressButtonEvent checkButton(uint64_t nowMS) {
         Button_Hold_Event_Fired = false;
       } else {
         const uint64_t heldMS = nowMS - Button_Press_Start_MS;
-        if (!Button_Long_Event_Fired && heldMS <= Button_Short_MS) {
+        if (!Button_Long_Event_Fired && heldMS < Button_Long_MS) {
           event = PressButtonEvent::ShortPress;
         } else if (!Button_Hold_Event_Fired && heldMS >= Button_Long_MS) {
           Button_Long_Event_Fired = true;
@@ -336,12 +326,12 @@ PressButtonEvent checkButton(uint64_t nowMS) {
         }
       }
     }
-    if (Button_Stable_State == LOW) {
-      const uint64_t heldMS = nowMS - Button_Press_Start_MS;
-      if (!Button_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
-        Button_Hold_Event_Fired = true;
-        event = PressButtonEvent::HoldPress;
-      }
+  }
+  if (Button_Stable_State == LOW) {
+    const uint64_t heldMS = nowMS - Button_Press_Start_MS;
+    if (!Button_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
+      Button_Hold_Event_Fired = true;
+      event = PressButtonEvent::HoldPress;
     }
   }
   return event;
@@ -356,13 +346,18 @@ enum class BootButtonEvent : uint8_t {
 };
 BootButtonEvent checkBootButton(uint64_t nowMS) {
   const uint8_t reading = static_cast<uint8_t>(digitalRead(RST_Pin));
-  if (reading != Boot_Last_Reading) {
-    Boot_Last_Change_MS = nowMS;
-    Boot_Last_Reading = reading;
-  }
   BootButtonEvent event = BootButtonEvent::None;
-  if ((nowMS - Boot_Last_Change_MS) >= Button_Debounce_MS) {
-    if (reading != Boot_Stable_State) {
+  if (reading == Boot_Stable_State) {
+    Boot_Consecutive_Reads = 0;
+  } else {
+    if (reading == Boot_Last_Reading) {
+      if (Boot_Consecutive_Reads < UINT8_MAX) Boot_Consecutive_Reads++;
+    } else {
+      Boot_Consecutive_Reads = 1;
+    }
+    Boot_Last_Reading = reading;
+    if (Boot_Consecutive_Reads >= 2) {
+      Boot_Consecutive_Reads = 0;
       Boot_Stable_State = reading;
       if (Boot_Stable_State == LOW) {
         Boot_Press_Start_MS = nowMS;
@@ -370,7 +365,7 @@ BootButtonEvent checkBootButton(uint64_t nowMS) {
         Boot_Hold_Event_Fired = false;
       } else {
         const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
-        if (!Boot_Long_Event_Fired && heldMS <= Button_Short_MS) {
+        if (!Boot_Long_Event_Fired && heldMS < Button_Long_MS) {
           event = BootButtonEvent::ShortPress;
         } else if (!Boot_Long_Event_Fired && heldMS >= Button_Long_MS) {
           Boot_Long_Event_Fired = true;
@@ -378,12 +373,12 @@ BootButtonEvent checkBootButton(uint64_t nowMS) {
         }
       }
     }
-    if (Boot_Stable_State == LOW) {
-      const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
-      if (!Boot_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
-        Boot_Hold_Event_Fired = true;
-        event = BootButtonEvent::HoldPress;
-      }
+  }
+  if (Boot_Stable_State == LOW) {
+    const uint64_t heldMS = nowMS - Boot_Press_Start_MS;
+    if (!Boot_Hold_Event_Fired && heldMS >= Button_Hold_MS) {
+      Boot_Hold_Event_Fired = true;
+      event = BootButtonEvent::HoldPress;
     }
   }
   return event;
@@ -395,14 +390,10 @@ bool initFrameBuffers() {
   Render_Height = static_cast<uint16_t>(display.height());
   Frame_Buffer_Bytes = static_cast<size_t>(Render_Width) * static_cast<size_t>(Render_Height) * sizeof(uint16_t);
   Frame_Canvas = new GFXcanvas16(Render_Width, Render_Height);
-  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) {
-    return false;
-  }
+  if (Frame_Canvas == nullptr || Frame_Canvas->getBuffer() == nullptr) return false;
   Frame_Back_Previous = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   Frame_Back_Current = static_cast<uint16_t *>(heap_caps_malloc(Frame_Buffer_Bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) {
-    return false;
-  }
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr) return false;
   memset(Frame_Back_Previous, 0, Frame_Buffer_Bytes);
   memset(Frame_Back_Current, 0, Frame_Buffer_Bytes);
   Frame_Have_Previous = false;
@@ -411,9 +402,7 @@ bool initFrameBuffers() {
 
 // Flush from PSRAM
 void flushDirtyRectFromPSRAM() {
-  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) {
-    return;
-  }
+  if (Frame_Back_Previous == nullptr || Frame_Back_Current == nullptr || Render_Width == 0 || Render_Height == 0) return;
   uint16_t dirtyX0 = Render_Width;
   uint16_t dirtyY0 = Render_Height;
   uint16_t dirtyX1 = 0;
@@ -427,9 +416,7 @@ void flushDirtyRectFromPSRAM() {
       for (uint16_t x = 0; x < Render_Width; ++x) {
         const size_t idx = rowOffset + static_cast<size_t>(x);
         if (Frame_Back_Current[idx] != Frame_Back_Previous[idx]) {
-          if (left < 0) {
-            left = static_cast<int16_t>(x);
-          }
+          if (left < 0) left = static_cast<int16_t>(x);
           right = static_cast<int16_t>(x);
         }
       }
@@ -468,9 +455,7 @@ void flushDirtyRectFromPSRAM() {
 
 // Load Compass Calibration Values
 bool loadCompassCalibrationFromNVS() {
-  if (!prefs.begin(Compass_NVS_Namespace, true)) {
-    return false;
-  }
+  if (!prefs.begin(Compass_NVS_Namespace, true)) return false;
   const bool valid = prefs.getBool(Calibration_Valid_Key, false);
   if (!valid || !prefs.isKey(Hard_Iron_X_Key)) {
     prefs.end();
@@ -482,9 +467,7 @@ bool loadCompassCalibrationFromNVS() {
   loaded.hard_iron[2] = prefs.getFloat(Hard_Iron_Z_Key, 0.0f);
   loaded.reference_field_gauss = prefs.getFloat(Reference_Mag_Gauss_Key, Reference_Field_Gauss);
   loaded.lsb_per_gauss = prefs.getFloat(Lsb_Per_Gauss_Key, Magnetometer_Lsb_Per_Gauss);
-  loaded.fitted_field_lsb = prefs.getFloat(
-      Fitted_Field_Lsb_Key,
-      loaded.reference_field_gauss * loaded.lsb_per_gauss);
+  loaded.fitted_field_lsb = prefs.getFloat(Fitted_Field_Lsb_Key, loaded.reference_field_gauss * loaded.lsb_per_gauss);
   const size_t soft_iron_size = prefs.getBytesLength(Soft_Iron_Key);
   if (soft_iron_size != (9U * sizeof(float))) {
     prefs.end();
@@ -500,9 +483,7 @@ bool loadCompassCalibrationFromNVS() {
 
 // Save Compass Calibration Values
 void saveCompassCalibrationToNVS(const CompassCalibrationMatrices& matrices) {
-  if (!prefs.begin(Compass_NVS_Namespace, false)) {
-    return;
-  }
+  if (!prefs.begin(Compass_NVS_Namespace, false)) return;
   prefs.putFloat(Hard_Iron_X_Key, matrices.hard_iron[0]);
   prefs.putFloat(Hard_Iron_Y_Key, matrices.hard_iron[1]);
   prefs.putFloat(Hard_Iron_Z_Key, matrices.hard_iron[2]);
@@ -559,9 +540,7 @@ void drawColCentreText(Adafruit_GFX &target, const char *text, int16_t colX, int
 
 // Backlight Level
 uint8_t ambientBacklightLevel(float lux) {
-  if (lux <= 0.0f) {
-    return Backlight_Low;
-  }
+  if (lux <= 0.0f) return Backlight_Low;
   float normalised = log10f(lux + 1.0f) / log10f(Ambient_Lux_Max + 1.0f);
   if (normalised < 0.0f) normalised = 0.0f;
   if (normalised > 1.0f) normalised = 1.0f;
@@ -637,7 +616,7 @@ float readCompassHeading() {
 
 // Compass Calibration - Data Collection
 bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
-  constexpr uint32_t Calibration_Sample_Period_MS = 10;  // ODR 100 Hz
+  constexpr uint32_t Calibration_Sample_Period_MS = 20;  // ODR 50 Hz
   constexpr size_t Calibration_Max_Samples = 9999U;      // Maximum 9999 samples
   Last_Calibration_Sample_Count = 0;
   Last_Calibration_Elapsed_MS = 0;
@@ -647,9 +626,7 @@ bool collectCompassSamples(std::vector<float>& mag_samples_xyz) {
   while ((millis() - start_ms) < Compass_Calibration_Duration_MS) {
     const uint32_t now_ms = millis();
     if ((now_ms - last_sample_ms) >= Calibration_Sample_Period_MS) {
-      if ((mag_samples_xyz.size() / 3U) >= Calibration_Max_Samples) {
-        break;
-      }
+      if ((mag_samples_xyz.size() / 3U) >= Calibration_Max_Samples) break;
       float raw_mag[3] = {0.0f, 0.0f, 0.0f};
       readMagTransformed(raw_mag);
       mag_samples_xyz.push_back(raw_mag[0]);
@@ -823,9 +800,7 @@ void updateTimer(float Depth, uint64_t nowMS) {
 
 // Stopwatch
 void updateStopwatch(uint64_t nowMS) {
-  if (!Stopwatch_Active) {
-    return;
-  }
+  if (!Stopwatch_Active) return;
   const uint64_t elapsedMS = nowMS - Stopwatch_Start_MS;
   Stopwatch_Minutes = static_cast<int>(elapsedMS / 60000ULL);
   if (Stopwatch_Minutes > 999) Stopwatch_Minutes = 999;
@@ -853,18 +828,12 @@ uint8_t readBatteryPercentage() {
     millivoltSum += analogReadMilliVolts(Battery_Pin);
   }
   float voltage = (millivoltSum / sampleCount) / 1000.0f * Battery_Divider_Ratio;
-  if (voltage <= Voltage_Table[0]) {
-    return Percentage_Table[0]; 
-  }
-  if (voltage >= Voltage_Table[Battery_Table_Size - 1]) {
-    return Percentage_Table[Battery_Table_Size - 1];
-  }
+  if (voltage <= Voltage_Table[0]) return Percentage_Table[0]; 
+  if (voltage >= Voltage_Table[Battery_Table_Size - 1]) return Percentage_Table[Battery_Table_Size - 1];
   for (size_t i = 0; i < Battery_Table_Size - 1; ++i) {
     float lower = Voltage_Table[i];
     float upper = Voltage_Table[i + 1];
-    if (voltage < upper) {
-      return ((voltage - lower) < (upper - voltage)) ? Percentage_Table[i] : Percentage_Table[i + 1];
-    }
+    if (voltage < upper) return ((voltage - lower) < (upper - voltage)) ? Percentage_Table[i] : Percentage_Table[i + 1];
   }
   return 0;
 }
@@ -892,9 +861,7 @@ void drawBatteryIndicator(Adafruit_GFX &target, uint8_t percentage) {
 // Heading Block
 void drawHeadingValue(Adafruit_GFX &target, int16_t x, int16_t y, int8_t font, float direction) {
   int heading = static_cast<int>(direction + 0.5f);
-  if (heading == 360) {
-    heading = 0;
-  }
+  if (heading == 360) heading = 0;
   char headingString[4];
   snprintf(headingString, sizeof(headingString), "%03u", heading);
   target.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
@@ -926,58 +893,36 @@ void drawCompassBanner(Adafruit_GFX &target, float direction) {
   const int16_t microTickBottomY = compassY + 4;   // Micro tick 4 pixels high
   for (uint8_t step = 1; step < 16; step += 2) {
     float delta = (22.5f * static_cast<float>(step)) - direction;
-    if (delta > 180.0f) {
-      delta -= 360.0f;
-    }
-    if (delta < -180.0f) {
-      delta += 360.0f;
-    }
-    if (delta < -90.0f || delta > 90.0f) {
-      continue;
-    }
+    if (delta > 180.0f) delta -= 360.0f;
+    if (delta < -180.0f) delta += 360.0f;
+    if (delta < -90.0f || delta > 90.0f) continue;
     const float linearX = static_cast<float>(centerX) + (delta * pixelsPerDegree);
     const float projectedX = projectCompassX3D(linearX, static_cast<float>(centerX), static_cast<float>(bannerWidth));
     const int16_t tickX = static_cast<int16_t>(projectedX + 0.5f);
-    if (tickX < 0 || tickX >= bannerWidth) {
-      continue;
-    }
+    if (tickX < 0 || tickX >= bannerWidth) continue;
     target.drawLine(tickX, compassY + 1, tickX, microTickBottomY, ST77XX_WHITE);  // Projected micro ticks
   }
   for (const CompassLabelBitmapSet &marker : Compass_Label_Bitmaps) {
     float delta = static_cast<float>(marker.degrees) - direction;
-    if (delta > 180.0f) {
-      delta -= 360.0f;
-    }
-    if (delta < -180.0f) {
-      delta += 360.0f;
-    }
-    if (delta < -90.0f || delta > 90.0f) {
-      continue;
-    }
+    if (delta > 180.0f) delta -= 360.0f;
+    if (delta < -180.0f) delta += 360.0f;
+    if (delta < -90.0f || delta > 90.0f) continue;
     const float linearX = static_cast<float>(centerX) + (delta * pixelsPerDegree);
     const float projectedX = projectCompassX3D(linearX, static_cast<float>(centerX), static_cast<float>(bannerWidth));
     const int16_t tickX = static_cast<int16_t>(projectedX + 0.5f);
-    if (tickX < 0 || tickX >= bannerWidth) {
-      continue;
-    }
+    if (tickX < 0 || tickX >= bannerWidth) continue;
     const bool majorTick = (marker.degrees % 90) == 0;
     target.drawLine(tickX, compassY + 1, tickX, majorTick ? majorTickBottomY : minorTickBottomY, ST77XX_WHITE);  // Projected micro ticks
-    if (majorTick) {
-      target.drawLine(tickX - 1, compassY + 1, tickX - 1, majorTickBottomY, ST77XX_WHITE);  // Projected major ticks
-    }
+    if (majorTick) target.drawLine(tickX - 1, compassY + 1, tickX - 1, majorTickBottomY, ST77XX_WHITE);  // Projected major ticks
     const float centerWeight = compassCenterWeight(projectedX, static_cast<float>(centerX));
     uint8_t labelVariant = static_cast<uint8_t>(centerWeight * static_cast<float>(Compass_Label_Bitmap_Variant_Count - 1) + 0.5f);
-    if (labelVariant >= Compass_Label_Bitmap_Variant_Count) {
-      labelVariant = Compass_Label_Bitmap_Variant_Count - 1;
-    }
+    if (labelVariant >= Compass_Label_Bitmap_Variant_Count) labelVariant = Compass_Label_Bitmap_Variant_Count - 1;
     const float scale = majorTick ? majorLabelScale : minorLabelScale;
     const int16_t labelW = static_cast<int16_t>(Compass_Label_Bitmap_Width * scale + 0.5f);
     const int16_t labelH = static_cast<int16_t>(Compass_Label_Bitmap_Height * scale + 0.5f);
     const int16_t labelX = tickX - (labelW / 2);
     const int16_t labelY = labelBaseY;
-    if (labelX < -labelW || labelX >= bannerWidth || labelY + labelH < compassY + 12 || labelY > compassY + 48) {
-      continue;
-    }
+    if (labelX < -labelW || labelX >= bannerWidth || labelY + labelH < compassY + 12 || labelY > compassY + 48) continue;
     const uint8_t *labelBitmap = marker.variants[labelVariant];
     drawScaledXBitmap(target, labelX, labelY, Compass_Label_Bitmap_Width, Compass_Label_Bitmap_Height, labelBitmap, scale, ST77XX_WHITE);  // Projected labels
   }
@@ -1122,9 +1067,7 @@ void showImage() {
   const uint16_t h = 240;
   const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
   uint16_t *buf = static_cast<uint16_t *>(heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (buf == nullptr) {
-    buf = static_cast<uint16_t *>(malloc(pixels * sizeof(uint16_t)));
-  }
+  if (buf == nullptr) buf = static_cast<uint16_t *>(malloc(pixels * sizeof(uint16_t)));
   if (buf == nullptr) return;
   for (size_t i = 0; i < pixels; ++i) {
     buf[i] = pgm_read_word(&image[i]);  // RGB565 bitmap
@@ -1138,9 +1081,6 @@ void showImage() {
 
 // WiFi AP JPEG Upload Server
 void startJpegUploadServer() {
-  if (Display_Task_Handle != nullptr) {
-    vTaskSuspend(Display_Task_Handle);
-  }
   esp_wifi_start();
   WiFi.mode(WIFI_AP);
   WiFi.softAP(SSID, Password);
@@ -1181,18 +1121,12 @@ void startJpegUploadServer() {
       HTTPUpload &upload = server.upload();
       static File uploadFile;
       if (upload.status == UPLOAD_FILE_START) {
-        if (SPIFFS.exists(Spiffs_Jpeg_Path)) {
-          SPIFFS.remove(Spiffs_Jpeg_Path);
-        }
+        if (SPIFFS.exists(Spiffs_Jpeg_Path)) SPIFFS.remove(Spiffs_Jpeg_Path);
         uploadFile = SPIFFS.open(Spiffs_Jpeg_Path, FILE_WRITE);
       } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (uploadFile) {
-          uploadFile.write(upload.buf, upload.currentSize);
-        }
+        if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
       } else if (upload.status == UPLOAD_FILE_END) {
-        if (uploadFile) {
-          uploadFile.close();
-        }
+        if (uploadFile) uploadFile.close();
         display.fillScreen(ST77XX_BLACK);
         display.setTextSize(3);
         display.setTextColor(ST77XX_GREEN);
@@ -1223,58 +1157,60 @@ bool jpegOutputCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *
   return true;
 }
 bool initSpiffsJpegSource() {
-  if (!SPIFFS.begin(true)) {
-    return false;
-  }
-  if (!SPIFFS.exists(Spiffs_Jpeg_Path)) {
-    return false;
-  }
+  if (!SPIFFS.begin(true)) return false;
+  if (!SPIFFS.exists(Spiffs_Jpeg_Path)) return false;
   uint16_t jpgW = 0;
   uint16_t jpgH = 0;
-  if (TJpgDec.getFsJpgSize(&jpgW, &jpgH, Spiffs_Jpeg_Path, SPIFFS) != JDR_OK) {
-    return false;
-  }
-  if (jpgW != LCD_Width || jpgH != LCD_Height) {
-    return false;
-  }
+  if (TJpgDec.getFsJpgSize(&jpgW, &jpgH, Spiffs_Jpeg_Path, SPIFFS) != JDR_OK) return false;
+  if (jpgW != LCD_Width || jpgH != LCD_Height) return false;
   TJpgDec.setJpgScale(1);
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegOutputCallback);
   return true;
 }
 
-// Display JPEG from SPIFFS
+// Display Image
 void showSpiffsJpeg() {
-  if (!Spiffs_Jpeg_Ready) {
-    if (Display_Task_Handle != nullptr) {
-      vTaskSuspend(Display_Task_Handle);
-    }
-    display.fillScreen(ST77XX_BLACK);
-    drawCentreText("No Image", 104, 3, ST77XX_RED);
-    delay(Message_MS);
-    if (Display_Task_Handle != nullptr) {
-      vTaskResume(Display_Task_Handle);
-    }
-    Frame_Have_Previous = false;
-    return;
+  if (Image_Task_Handle != nullptr) return;
+  BaseType_t res = xTaskCreatePinnedToCore(
+      [](void *pvParameters) {
+        (void)pvParameters;
+        if (!Spiffs_Jpeg_Ready) {
+          if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
+          display.fillScreen(ST77XX_BLACK);
+          drawCentreText("No Image", 104, 3, ST77XX_RED);
+          vTaskDelay(pdMS_TO_TICKS(Message_MS));
+          if (Display_Task_Handle != nullptr) vTaskResume(Display_Task_Handle);
+          Frame_Have_Previous = false;
+          Image_Task_Handle = nullptr;
+          vTaskDelete(nullptr);
+          return;
+        }
+        if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
+        display.fillScreen(ST77XX_BLACK);
+        const JRESULT decodeResult = TJpgDec.drawFsJpg(0, 0, Spiffs_Jpeg_Path, SPIFFS);
+        if (decodeResult == JDR_OK) {
+          vTaskDelay(pdMS_TO_TICKS(Message_MS * 3));
+        } else {
+          display.fillScreen(ST77XX_BLACK);
+          drawCentreText("Image Error", 104, 3, ST77XX_RED);
+          vTaskDelay(pdMS_TO_TICKS(Message_MS));
+        }
+        display.fillScreen(ST77XX_BLACK);
+        if (Display_Task_Handle != nullptr) vTaskResume(Display_Task_Handle);
+        Frame_Have_Previous = false;
+        Image_Task_Handle = nullptr;
+        vTaskDelete(nullptr);
+      },
+      "ImageTask",
+      12288, // Stack size 12 KB
+      nullptr,
+      3,  // Priority 3
+      &Image_Task_Handle,
+      1);  // Core 1
+  if (res != pdPASS) {
+    Image_Task_Handle = nullptr;
   }
-  if (Display_Task_Handle != nullptr) {
-    vTaskSuspend(Display_Task_Handle);
-  }
-  display.fillScreen(ST77XX_BLACK);
-  const JRESULT decodeResult = TJpgDec.drawFsJpg(0, 0, Spiffs_Jpeg_Path, SPIFFS);
-  if (decodeResult == JDR_OK) {
-    delay(Message_MS * 3);
-  } else {
-    display.fillScreen(ST77XX_BLACK);
-    drawCentreText("Image Error", 104, 3, ST77XX_RED);
-    delay(Message_MS);
-  }
-  display.fillScreen(ST77XX_BLACK);
-  if (Display_Task_Handle != nullptr) {
-    vTaskResume(Display_Task_Handle);
-  }
-  Frame_Have_Previous = false;
 }
 
 // Power Off
@@ -1305,8 +1241,8 @@ void setup() {
   // Power on
   pinMode(Button_Pin, INPUT_PULLUP);
   pinMode(RST_Pin, INPUT);
-  rtc_gpio_isolate(static_cast<gpio_num_t>(GND_Pin));
-  rtc_gpio_hold_dis(static_cast<gpio_num_t>(Backlight_Pin));
+  rtc_gpio_isolate(static_cast<gpio_num_t>(GND_Pin));  // Isolate grounded pin
+  rtc_gpio_hold_dis(static_cast<gpio_num_t>(Backlight_Pin));  // Disable previous hold
   pinMode(Backlight_Pin, OUTPUT);
   digitalWrite(Backlight_Pin, LOW);  // Backlight initially off
   delay(10);
@@ -1319,9 +1255,7 @@ void setup() {
     }
     delay(10);
   }
-  if (!buttonHeld) {
-    powerOff();
-  }
+  if (!buttonHeld) powerOff();
 
   // Power conservation
   esp_wifi_stop();
@@ -1375,20 +1309,20 @@ void setup() {
   // QMI8658 initialisation
   qmi.begin(Wire, QMI8658_I2C_Address, SDA_Pin, SCL_Pin);
   qmi.enableSyncSampleMode();
-  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_112_1Hz, SensorQMI8658::LPF_MODE_2);
-  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_125Hz, SensorQMI8658::LPF_MODE_2);
+  qmi.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_56_05Hz, SensorQMI8658::LPF_MODE_2);
+  qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_62_5Hz, SensorQMI8658::LPF_MODE_2);
   qmi.enableGyroscope();
   qmi.enableAccelerometer();  
 
   // QMC5883P initialisation
   qmc.begin(Wire, QMC5883P_I2C_Address, SDA_Pin, SCL_Pin);
-  qmc.configMagnetometer(OperationMode::CONTINUOUS_MEASUREMENT, MagFullScaleRange::FS_8G, 100.0f, MagOverSampleRatio::OSR_8, MagDownSampleRatio::DSR_8);  // ODR 100 Hz
+  qmc.configMagnetometer(OperationMode::CONTINUOUS_MEASUREMENT, MagFullScaleRange::FS_8G, 50.0f, MagOverSampleRatio::OSR_8, MagDownSampleRatio::DSR_8);  // ODR 50 Hz
   compassConfigureReferenceField(Reference_Field_Gauss, Magnetometer_Lsb_Per_Gauss);
   if (!loadCompassCalibrationFromNVS()) {
     Compass_Matrices = {};
     compassSetCalibrationMatrices(nullptr);
   }
-  ahrs.begin(100.0f);  // AHRS update rate 100 Hz
+  ahrs.begin(20.0f);  // AHRS update rate 20 Hz
 
   // ZHL-16C initialisation
   decoSetup(GF_Low, GF_High, Setpoint);
@@ -1441,22 +1375,19 @@ void setup() {
   xTaskCreatePinnedToCore(
       [](void *) {
         TickType_t lastWakeTick = xTaskGetTickCount();
-        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Button_Update_MS);
+        const TickType_t fastPeriodTicks = pdMS_TO_TICKS(Display_Update_MS);
         uint64_t lastButtonUpdateMS = 0;
         uint64_t lastDepthUpdateMS = 0;
         for (;;) {
           const uint64_t nowMS = millis();
-          // 100 Hz tasks
-          if ((nowMS - lastButtonUpdateMS) >= Button_Update_MS) {
+          // 20 Hz tasks
+          if ((nowMS - lastButtonUpdateMS) >= Display_Update_MS) {
             lastButtonUpdateMS = nowMS;
             updateStopwatch(nowMS);
             // Press button detection
             const PressButtonEvent buttonEvent = checkButton(nowMS);
             if (buttonEvent == PressButtonEvent::LongPress) {
               // Long press to display image from SPIFFS
-              if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
               showSpiffsJpeg();
             } else if (buttonEvent == PressButtonEvent::HoldPress) {
               if (Depth >= Dive_Start_Depth) {
@@ -1466,9 +1397,7 @@ void setup() {
                 Deco_Last_Update_MS = nowMS - Deco_Update_MS;
               } else {
                 // Hold button to power off on surface
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
+                if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Power", 75, 4, ST77XX_CYAN);
                 drawCentreText("Off", 135, 4, ST77XX_CYAN);
@@ -1490,9 +1419,7 @@ void setup() {
               // Long press boot button to toggle demo mode
               Demo_Mode = !Demo_Mode;
               saveDemoMode();
-              if (Display_Task_Handle != nullptr) {
-                vTaskSuspend(Display_Task_Handle);
-              }
+              if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
               display.fillScreen(ST77XX_BLACK);
               drawCentreText("Demo", 75, 4, ST77XX_CYAN);
               drawCentreText(Demo_Mode ? "On" : "Off", 135, 4, ST77XX_CYAN);
@@ -1500,13 +1427,12 @@ void setup() {
               esp_restart();  // Restart after mode change
             } else if (bootEvent == BootButtonEvent::HoldPress) {
               // Hold boot button to upload JPEG image via WiFi AP
+              if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
               startJpegUploadServer();
             } else if (bootEvent == BootButtonEvent::ShortPress) {
               if (Depth >= Dive_Start_Depth) {
                 // Short press underwater to power off (exit in case of MS5837 error)
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
+                if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Power", 75, 4, ST77XX_CYAN);
                 drawCentreText("Off", 135, 4, ST77XX_CYAN);
@@ -1515,9 +1441,7 @@ void setup() {
                 powerOff();
               } else {
                 // Short press on surface to start compass calibration
-                if (Display_Task_Handle != nullptr) {
-                  vTaskSuspend(Display_Task_Handle);
-                }
+                if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
                 display.fillScreen(ST77XX_BLACK);
                 drawCentreText("Compass", 75, 4, ST77XX_WHITE);
                 drawCentreText("Calibration", 135, 4, ST77XX_WHITE);
@@ -1575,9 +1499,7 @@ void setup() {
             }
             analogWrite(Backlight_Pin, Backlight_Level);
             if (Battery_Percentage <= Critical_Battery_Threshold) {
-              if (Display_Task_Handle != nullptr) {
-                vTaskSuspend(Display_Task_Handle);
-              }
+              if (Display_Task_Handle != nullptr) vTaskSuspend(Display_Task_Handle);
               display.fillScreen(ST77XX_BLACK);
               drawCentreText("Battery", 86, 4, ST77XX_RED);
               drawCentreText("Low", 144, 4, ST77XX_RED);
