@@ -1233,12 +1233,14 @@ void powerOff() {
   rtc_gpio_pullup_en(static_cast<gpio_num_t>(Button_Pin));
   rtc_gpio_pulldown_dis(static_cast<gpio_num_t>(Button_Pin));
   esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(Button_Pin), 0);
+  gpio_deep_sleep_hold_en();
   delay(10);
   esp_deep_sleep_start();
 }
 
 void setup() {
   // Power on
+  gpio_deep_sleep_hold_dis();
   pinMode(Button_Pin, INPUT_PULLUP);
   pinMode(RST_Pin, INPUT);
   rtc_gpio_isolate(static_cast<gpio_num_t>(GND_Pin));  // Isolate grounded pin
